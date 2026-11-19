@@ -1,0 +1,12 @@
+name: tz-mock
+channels:
+  - conda-forge
+dependencies:
+  - python=3.14
+  - pip
+  - pip:
+      - fastapi>=0.115
+      - uvicorn>=0.30
+      - python-multipart>=0.0.9
+      - pytest>=8
+      - httpx2>=2.16

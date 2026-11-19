@@ -1,0 +1,6 @@
+# Not an installable package: run from the repo root (`python -m tz_mock`, `pytest`).
+# Dependencies live in environment.yml.
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
