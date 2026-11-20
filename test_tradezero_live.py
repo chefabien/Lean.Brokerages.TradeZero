@@ -1,4 +1,4 @@
-"""Unit tests for tradezero_live.py (no network, no docker): python3 -m unittest discover -s docker"""
+"""Unit tests for tradezero_live.py (no network, no docker): python3 -m unittest test_tradezero_live"""
 
 import json
 import os

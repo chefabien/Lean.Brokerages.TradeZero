@@ -119,10 +119,10 @@ docker compose -f .devcontainer/docker-compose.yml exec -e TZ_API_KEY_ID -e TZ_A
 
 ## Run live (launcher)
 
-The plugin is distributed as a GitHub Release asset, `tradezero-plugin-lean<V>.zip`. Each asset is built for one LEAN version `<V>`. It runs on the **official `quantconnect/lean:<V>` image**, at a fixed tag, never `latest`. [docker/tradezero_live.py](docker/tradezero_live.py) (Python 3, standard library only) assembles a run:
+The plugin is distributed as a GitHub Release asset, `tradezero-plugin-lean<V>.zip`. Each asset is built for one LEAN version `<V>`. It runs on the **official `quantconnect/lean:<V>` image**, at a fixed tag, never `latest`. [tradezero_live.py](tradezero_live.py) (Python 3, standard library only) assembles a run:
 
 ```bash
-python3 docker/tradezero_live.py --data-feed polygon --algorithm ./MyAlgorithm --lean-json ~/qc_workspace/lean.json
+python3 tradezero_live.py --data-feed polygon --algorithm ./MyAlgorithm --lean-json ~/qc_workspace/lean.json
 ```
 
 1. **LEAN version.** It reads the version of your local `quantconnect/lean` image and uses it if a plugin release asset exists for that version or an older one. If every asset is newer than your image, or you have no local image, it uses the newest LEAN version an asset exists for, and pulls that fixed tag.
@@ -142,7 +142,7 @@ python3 docker/tradezero_live.py --data-feed polygon --algorithm ./MyAlgorithm -
 - **Private repository:** the launcher finds the repository with `--repo owner/name` (or `TZ_PLUGIN_REPO`, or the `origin` remote). For a private repository it needs a token: `GITHUB_TOKEN`, or `gh auth login`.
 - **Other options:** `--lean-version`, `--plugin-version <tag>`, `--environment live`, `--set key=value` for any LEAN config value (for example `--set tradezero-intraday-leverage=1`), `--plugin-zip` (use a local build), and `--help`.
 
-[docker/smoke-test.sh](docker/smoke-test.sh) checks a zip end to end against tz-mock, with the `fake` feed: it reads the account from Python, then places and cancels an order.
+[smoke-test/smoke-test.sh](smoke-test/smoke-test.sh) checks a zip end to end against tz-mock, with the `fake` feed: it reads the account from Python, then places and cancels an order.
 
 ## CI/CD (GitHub Actions)
 
@@ -151,7 +151,7 @@ python3 docker/tradezero_live.py --data-feed polygon --algorithm ./MyAlgorithm -
 | Stage | Runs on | What it does |
 |---|---|---|
 | **Build** | every push and PR | Compiles the solution in `quantconnect/lean:<V>` for the tests. Builds the plugin against that image's own LEAN binaries: `dist/tradezero-plugin-lean<V>.zip` + `.sha256`. |
-| **Test** | every push and PR | Runs every test except `Paper`: unit, tz-mock, LEAN's brokerage suite and Python. Then the launcher's unit tests, and `docker/smoke-test.sh` on the zip. Test results and the zip are uploaded as an artifact. |
+| **Test** | every push and PR | Runs every test except `Paper`: unit, tz-mock, LEAN's brokerage suite and Python. Then the launcher's unit tests, and `smoke-test/smoke-test.sh` on the zip. Test results and the zip are uploaded as an artifact. |
 | **Publish** | `v*` tags | Creates the GitHub Release with the zip and its checksum. |
 
 - **No TradeZero credentials in CI:** the paper-API tests (category `Paper`) are run locally only (see above).

@@ -9,7 +9,7 @@
 #          another Lean version to that existing release (a release can serve several Lean versions).
 #
 # Lean is pinned to a fixed version (no floating tag). Users get the matching asset through
-# docker/tradezero_live.py.
+# tradezero_live.py.
 name: Build, test and publish
 
 on:
@@ -149,10 +149,11 @@ jobs:
               --results-directory /work/test-results
 
       - name: "Test: launcher unit tests"
-        run: python3 -m unittest discover -s "$REPO_DIR/docker" -v
+        working-directory: ${{ env.REPO_DIR }}
+        run: python3 -m unittest -v test_tradezero_live
 
       - name: "Test: smoke test of the release asset (plain Lean image + plugin + tz-mock)"
-        run: '"$REPO_DIR/docker/smoke-test.sh" "$ASSET"'
+        run: '"$REPO_DIR/smoke-test/smoke-test.sh" "$ASSET"'
 
       - name: "Test: upload results and asset"
         if: always()

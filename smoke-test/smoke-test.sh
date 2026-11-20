@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # End-to-end check of a plugin release asset, run the way users run it: the official quantconnect/lean image,
 # the TradeZero plugin mounted by tradezero_live.py, tz-mock as the TradeZero API and Lean's FakeDataQueue as
-# market data. The algorithm (docker/smoke/main.py) reads the account from Python, places a far limit order
+# market data. The algorithm (smoke-test/algorithm/main.py) reads the account from Python, places a far limit order
 # and cancels it.
 #
-#   docker/smoke-test.sh dist/tradezero-plugin-lean<V>.zip     (quantconnect/lean:<V> must be pullable or local)
+#   smoke-test/smoke-test.sh dist/tradezero-plugin-lean<V>.zip     (quantconnect/lean:<V> must be pullable or local)
 set -euo pipefail
 
 ZIP=$(realpath "${1:?usage: $0 path/to/tradezero-plugin-lean<V>.zip}")
@@ -25,7 +25,7 @@ for _ in $(seq 30); do
   sleep 1
 done
 
-python3 "$HERE/tradezero_live.py" --data-feed fake --algorithm "$HERE/smoke" --plugin-zip "$ZIP" \
+python3 "$HERE/../tradezero_live.py" --data-feed fake --algorithm "$HERE/algorithm" --plugin-zip "$ZIP" \
   --tradezero-api-url http://tz-smoke-mock:8000 --docker-network tz-smoke \
   --out "$WORK/run" --cache "$WORK/cache" --container-name tz-smoke-lean </dev/null
 
