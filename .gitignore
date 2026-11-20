@@ -285,3 +285,6 @@ Results/
 *.jsonl.*
 !.devcontainer/post-create.sh
 !docker/smoke-test.sh
+
+# plugin release build output
+dist/

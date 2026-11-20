@@ -11,7 +11,8 @@ TradeZero brokerage plugin for [QuantConnect LEAN](https://github.com/QuantConne
 | Updates | Cancel-then-replace, because TradeZero has no modify endpoint. |
 | Safety | `tradezero-environment` defaults to `paper`. The brokerage refuses to connect if the account's `accountType` does not match. |
 | Debugging | Optional JSON-lines log of every API exchange, with the API key and secret masked. |
-| Market data | None: TradeZero has no market-data API. Choose a LEAN data feed at runtime. |
+| Market data | None: TradeZero has no market-data API. The launcher adds a LEAN data feed at runtime (Polygon, Databento, Alpaca). |
+| Distribution | A GitHub Release asset per LEAN version, run on the official `quantconnect/lean:<version>` image (see *Run live*). |
 
 ## Order mapping
 
@@ -116,42 +117,46 @@ The tests:
 docker compose -f .devcontainer/docker-compose.yml exec -e TZ_API_KEY_ID -e TZ_API_SECRET_KEY dev dotnet test QuantConnect.TradeZeroBrokerage.Tests --filter TestCategory=Paper
 ```
 
-## Docker image
+## Run live (launcher)
+
+The plugin is distributed as a GitHub Release asset, `tradezero-plugin-lean<V>.zip`. Each asset is built for one LEAN version `<V>`. It runs on the **official `quantconnect/lean:<V>` image**, at a fixed tag, never `latest`. [docker/tradezero_live.py](docker/tradezero_live.py) (Python 3, standard library only) assembles a run:
 
 ```bash
-docker build -t lean-tradezero .
+python3 docker/tradezero_live.py --data-feed polygon --algorithm ./MyAlgorithm --lean-json ~/qc_workspace/lean.json
 ```
 
-- The image is `quantconnect/lean` plus `QuantConnect.Brokerages.TradeZero.dll`, compiled against the image's own Lean binaries. Pin a version with `--build-arg LEAN_IMAGE=quantconnect/lean:<tag>`.
-- **No data feed is embedded:** you choose it at runtime. Put a data-feed plugin's DLLs in a folder mounted at `/Lean/plugins`, then name its class in `data-queue-handler` (see [docker/config.tradezero.json](docker/config.tradezero.json)):
+1. **LEAN version.** It reads the version of your local `quantconnect/lean` image and uses it if a plugin release asset exists for that version or an older one. If every asset is newer than your image, or you have no local image, it uses the newest LEAN version an asset exists for, and pulls that fixed tag.
+2. **TradeZero plugin.** Like the data feeds, it takes the asset built for that LEAN version or the closest older one, and says so when it isn't an exact match. It downloads the asset if it isn't cached (`~/.cache/lean-tradezero`) and checks its `.sha256`.
+3. **Data feed.** It fetches the feed from nuget.org, using the newest build not newer than that LEAN version. Only the files the LEAN image doesn't already contain are kept.
+4. **Output.** It writes `tradezero-run/config.json` (mode 0600) and `tradezero-run/run.sh`, and prints the `docker run` command. The plugins are mounted at `/Lean/plugins`.
 
-```bash
-docker run --rm -it \
-  -v $PWD/docker/config.tradezero.json:/config/config.json:ro \
-  -v $PWD/MyAlgorithm:/Algorithm:ro \
-  -v $PWD/my-data-feed-dlls:/Lean/plugins:ro \
-  -v $PWD/results:/Results \
-  -e TZ_API_KEY_ID -e TZ_API_SECRET_KEY \
-  lean-tradezero --config /config/config.json
-```
+| `--data-feed` | Package | Keys (environment variables, otherwise asked) |
+|---|---|---|
+| `polygon` | `QuantConnect.Lean.DataSource.Polygon` | `POLYGON_API_KEY`, `POLYGON_LICENSE_TYPE` (Individual/Business) |
+| `databento` | `QuantConnect.Lean.DataSource.DataBento` | `DATABENTO_API_KEY` |
+| `alpaca` | `QuantConnect.Brokerages.Alpaca` | `ALPACA_API_KEY`, `ALPACA_API_SECRET`, `ALPACA_ENVIRONMENT` (paper/live) |
+| `fake` | built into LEAN | none; random prices, **testing only** |
 
-`docker/smoke-test.sh` runs the image end to end against tz-mock, with Lean's fake data feed: connect, read the account from Python, place and cancel an order.
+- **QuantConnect account required for real feeds.** QuantConnect's feed modules check at startup, through the QuantConnect API, that your QuantConnect account is entitled to them, just as under lean-cli. The launcher reads your user id and API token from `QC_USER_ID` / `QC_API_ACCESS_TOKEN`, or from lean-cli's `~/.lean/credentials` (after `lean login`). It reads your organization id from `QC_ORGANIZATION_ID`, or from a lean-cli workspace `lean.json` given with `--lean-json`.
+- **TradeZero keys are never written to a file:** `run.sh` passes `TZ_API_KEY_ID` / `TZ_API_SECRET_KEY` from your environment. The feed's keys and the QuantConnect token go into `config.json`, which only you can read, because LEAN reads them only from its config.
+- **Private repository:** the launcher finds the repository with `--repo owner/name` (or `TZ_PLUGIN_REPO`, or the `origin` remote). For a private repository it needs a token: `GITHUB_TOKEN`, or `gh auth login`.
+- **Other options:** `--lean-version`, `--plugin-version <tag>`, `--environment live`, `--set key=value` for any LEAN config value (for example `--set tradezero-intraday-leverage=1`), `--plugin-zip` (use a local build), and `--help`.
+
+[docker/smoke-test.sh](docker/smoke-test.sh) checks a zip end to end against tz-mock, with the `fake` feed: it reads the account from Python, then places and cancels an order.
 
 ## CI/CD (GitHub Actions)
 
-[.github/workflows/build-test-publish.yml](.github/workflows/build-test-publish.yml) is a single job, so the LEAN image (about 27 GB) is downloaded once. Its steps run in three stages, and each stage runs only if the previous one passed:
+[.github/workflows/build-test-publish.yml](.github/workflows/build-test-publish.yml) is a single job pinned to one LEAN version (`LEAN_VERSION`, currently 18278; bump it deliberately). Each stage runs only if the previous one passed:
 
 | Stage | Runs on | What it does |
 |---|---|---|
-| **Build** | every push and PR | Checks out LEAN next to the repo (same branch name if LEAN has it, else `master`). Compiles the solution in the `quantconnect/lean` image, then builds the Docker image on that same base. |
-| **Test** | every push and PR | Starts tz-mock and runs every test except `Paper`: unit, tz-mock, LEAN's brokerage suite and Python. Then runs `docker/smoke-test.sh` on the image. The `.trx` results are uploaded as an artifact. |
-| **Publish** | push to `main`, `v*` tags | Pushes the tested image as `ghcr.io/<owner>/lean-tradezero` with tags `:sha-<commit>` and `:lean-<lean version>`, plus `:latest` on `main` or `:<tag>` for a tag. Nothing is pushed for pull requests. |
+| **Build** | every push and PR | Compiles the solution in `quantconnect/lean:<V>` for the tests. Builds the plugin against that image's own LEAN binaries: `dist/tradezero-plugin-lean<V>.zip` + `.sha256`. |
+| **Test** | every push and PR | Runs every test except `Paper`: unit, tz-mock, LEAN's brokerage suite and Python. Then the launcher's unit tests, and `docker/smoke-test.sh` on the zip. Test results and the zip are uploaded as an artifact. |
+| **Publish** | `v*` tags | Creates the GitHub Release with the zip and its checksum. |
 
 - **No TradeZero credentials in CI:** the paper-API tests (category `Paper`) are run locally only (see above).
-- **Only tested images are pushed:** the image is pushed after the tests and the smoke test pass.
-- **Image access:** the first push creates a private package. Make it public, or grant access, under *Packages* on GitHub.
-- **Manual runs** (*Run workflow*) can pick another LEAN git ref and base image.
-- **Disk space:** the LEAN image is about 27 GB, so each job first frees disk space on the hosted runner.
+- **Supporting another LEAN version:** run the workflow manually with `lean_version` set to that version and `release_tag` set to an existing release. It builds and tests that tag's code against that LEAN version, then adds the asset to the release.
+- **Disk space:** the LEAN image is about 27 GB, so the job first frees disk space on the hosted runner.
 
 ## Not supported (yet)
 

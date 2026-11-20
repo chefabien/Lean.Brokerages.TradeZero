@@ -1,6 +1,0 @@
-.git
-**/bin/
-**/obj/
-tz-mock/
-.devcontainer/
-*.jsonl
