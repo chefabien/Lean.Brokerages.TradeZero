@@ -139,15 +139,16 @@ docker run --rm -it \
 
 ## CI/CD (GitHub Actions)
 
-[.github/workflows/test-build-publish.yml](.github/workflows/test-build-publish.yml) runs three jobs, each starting only if the previous one passed:
+[.github/workflows/build-test-publish.yml](.github/workflows/build-test-publish.yml) is a single job, so the LEAN image (about 27 GB) is downloaded once. Its steps run in three stages, and each stage runs only if the previous one passed:
 
-| Job | Runs on | What it does |
+| Stage | Runs on | What it does |
 |---|---|---|
-| **test** | every push and PR | Checks out LEAN next to the repo (same branch name if LEAN has it, else `master`) and starts tz-mock. It then compiles the solution in the `quantconnect/lean` image and runs every test except `Paper`: unit, tz-mock, LEAN's brokerage suite and Python. The `.trx` results are uploaded as an artifact. |
-| **build** | every push and PR | Builds the Docker image and runs `docker/smoke-test.sh` on it. Outside PRs it pushes the tested image as `ghcr.io/<owner>/lean-tradezero:sha-<commit>`. |
-| **publish** | `main` and `v*` tags | Promotes that exact image to `:latest`, `:lean-<lean version>` and `:<tag>` with a registry-side retag. Nothing is rebuilt. |
+| **Build** | every push and PR | Checks out LEAN next to the repo (same branch name if LEAN has it, else `master`). Compiles the solution in the `quantconnect/lean` image, then builds the Docker image on that same base. |
+| **Test** | every push and PR | Starts tz-mock and runs every test except `Paper`: unit, tz-mock, LEAN's brokerage suite and Python. Then runs `docker/smoke-test.sh` on the image. The `.trx` results are uploaded as an artifact. |
+| **Publish** | push to `main`, `v*` tags | Pushes the tested image as `ghcr.io/<owner>/lean-tradezero` with tags `:sha-<commit>` and `:lean-<lean version>`, plus `:latest` on `main` or `:<tag>` for a tag. Nothing is pushed for pull requests. |
 
 - **No TradeZero credentials in CI:** the paper-API tests (category `Paper`) are run locally only (see above).
+- **Only tested images are pushed:** the image is pushed after the tests and the smoke test pass.
 - **Image access:** the first push creates a private package. Make it public, or grant access, under *Packages* on GitHub.
 - **Manual runs** (*Run workflow*) can pick another LEAN git ref and base image.
 - **Disk space:** the LEAN image is about 27 GB, so each job first frees disk space on the hosted runner.

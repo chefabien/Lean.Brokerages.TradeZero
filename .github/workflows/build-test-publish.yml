@@ -1,0 +1,176 @@
+# Build the TradeZero brokerage, run every test that needs no TradeZero credentials against tz-mock,
+# build the Docker image, smoke-test it end to end and push it to the GitHub Container Registry
+# (ghcr.io/<owner>/lean-tradezero).
+#
+# - pull requests: build + tests + image build + smoke test (no push)
+# - push to main:   ... + push :latest, :sha-<commit>, :lean-<lean version>
+# - tag v*:         ... + push :<tag>, :sha-<commit>, :lean-<lean version>
+#
+# Paper-API tests (category "Paper") are never run here: they are run locally only, so CI needs no
+# TradeZero secret.
+#
+# One job on purpose: the Lean image (~27 GB) is pulled once and used both to compile/test (it ships the
+# .NET SDK and Python/pythonnet, like the dev container) and as the base of the published image, and the
+# image is pushed only after it passed the tests.
+name: Build, test and publish
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      lean_ref:
+        description: QuantConnect/Lean git ref to compile against (when no Lean branch has this branch's name)
+        default: master
+      lean_image:
+        description: Lean image used to compile/test and as the base of the published image
+        default: quantconnect/lean:latest
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  LEAN_REF: ${{ inputs.lean_ref || 'master' }}
+  LEAN_IMAGE: ${{ inputs.lean_image || 'quantconnect/lean:latest' }}
+  REPO_DIR: Lean.Brokerages.TradeZero
+
+jobs:
+  build-test-publish:
+    name: Build, test, publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      # ---------------------------------------------------------------- setup
+
+      # the Lean image is large: make room on the hosted runner
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          docker-images: true
+          swap-storage: false
+
+      # the projects reference Lean as a sibling folder (../Lean)
+      - name: Checkout TradeZero brokerage
+        uses: actions/checkout@v4
+        with:
+          path: ${{ env.REPO_DIR }}
+
+      - name: Checkout Lean (same branch name)
+        id: lean-same-branch
+        continue-on-error: true
+        uses: actions/checkout@v4
+        with:
+          repository: QuantConnect/Lean
+          ref: ${{ github.head_ref || github.ref_name }}
+          path: Lean
+
+      - name: Checkout Lean (${{ env.LEAN_REF }})
+        if: steps.lean-same-branch.outcome != 'success'
+        uses: actions/checkout@v4
+        with:
+          repository: QuantConnect/Lean
+          ref: ${{ env.LEAN_REF }}
+          path: Lean
+
+      - name: Pull Lean image
+        id: base
+        run: |
+          docker pull "$LEAN_IMAGE"
+          version=$(docker inspect --format '{{ index .Config.Labels "lean_version" }}' "$LEAN_IMAGE")
+          echo "lean_version=${version}" >> "$GITHUB_OUTPUT"
+          echo "Lean version of $LEAN_IMAGE: ${version:-unknown}"
+          df -h /
+
+      # ---------------------------------------------------------------- build
+
+      - name: "Build: compile solution"
+        run: |
+          docker run --rm --network host --entrypoint dotnet \
+            -v "$GITHUB_WORKSPACE:/work" -w "/work/$REPO_DIR" "$LEAN_IMAGE" \
+            build QuantConnect.TradeZeroBrokerage.sln -c Release /v:quiet /p:WarningLevel=1
+
+      - name: "Build: Docker image"
+        working-directory: ${{ env.REPO_DIR }}
+        run: |
+          docker build \
+            --build-arg LEAN_IMAGE="$LEAN_IMAGE" \
+            --label org.opencontainers.image.source="https://github.com/${GITHUB_REPOSITORY}" \
+            --label org.opencontainers.image.revision="${GITHUB_SHA}" \
+            --label lean_version="${{ steps.base.outputs.lean_version }}" \
+            -t lean-tradezero:ci .
+
+      # ---------------------------------------------------------------- test
+
+      - name: "Test: start tz-mock"
+        run: |
+          docker build -t tz-mock "$REPO_DIR/tz-mock"
+          docker run -d --name tzmock -p 127.0.0.1:8000:8000 tz-mock
+          for _ in $(seq 30); do
+            curl -sf http://127.0.0.1:8000/mock/scenarios > /dev/null && exit 0
+            sleep 1
+          done
+          docker logs tzmock
+          exit 1
+
+      - name: "Test: unit, tz-mock, Lean brokerage suite, Python (no TradeZero credentials)"
+        run: |
+          docker run --rm --network host --entrypoint dotnet \
+            -v "$GITHUB_WORKSPACE:/work" -w "/work/$REPO_DIR" \
+            -e TZ_MOCK_URL=http://127.0.0.1:8000 "$LEAN_IMAGE" \
+            test QuantConnect.TradeZeroBrokerage.Tests/QuantConnect.TradeZeroBrokerage.Tests.csproj \
+              -c Release --no-build --filter "TestCategory!=Paper" \
+              --logger "trx;LogFileName=tests.trx" --logger "console;verbosity=normal" \
+              --results-directory /work/test-results
+
+      - name: "Test: smoke test image (Lean live mode -> plugin -> tz-mock)"
+        working-directory: ${{ env.REPO_DIR }}
+        run: docker/smoke-test.sh lean-tradezero:ci
+
+      - name: "Test: upload results"
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: test-results/
+          if-no-files-found: ignore
+
+      - name: "Test: tz-mock logs"
+        if: failure()
+        run: docker logs tzmock 2>&1 | tail -200
+
+      # ---------------------------------------------------------------- publish
+
+      - name: "Publish: log in to GitHub Container Registry"
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: "Publish: push image"
+        if: github.event_name != 'pull_request'
+        env:
+          LEAN_VERSION: ${{ steps.base.outputs.lean_version }}
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/lean-tradezero"
+          tags=("sha-${GITHUB_SHA::7}")
+          if [ -n "$LEAN_VERSION" ]; then tags+=("lean-${LEAN_VERSION}"); fi
+          if [ "$GITHUB_REF" = "refs/heads/main" ]; then tags+=("latest"); fi
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then tags+=("${GITHUB_REF_NAME}"); fi
+          for tag in "${tags[@]}"; do
+            docker tag lean-tradezero:ci "${image}:${tag}"
+            docker push "${image}:${tag}"
+            echo "Pushed \`${image}:${tag}\`" | tee -a "$GITHUB_STEP_SUMMARY"
+          done
