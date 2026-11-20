@@ -137,6 +137,21 @@ docker run --rm -it \
 
 `docker/smoke-test.sh` runs the image end to end against tz-mock, with Lean's fake data feed: connect, read the account from Python, place and cancel an order.
 
+## CI/CD (GitHub Actions)
+
+[.github/workflows/test-build-publish.yml](.github/workflows/test-build-publish.yml) runs three jobs, each starting only if the previous one passed:
+
+| Job | Runs on | What it does |
+|---|---|---|
+| **test** | every push and PR | Checks out LEAN next to the repo (same branch name if LEAN has it, else `master`) and starts tz-mock. It then compiles the solution in the `quantconnect/lean` image and runs every test except `Paper`: unit, tz-mock, LEAN's brokerage suite and Python. The `.trx` results are uploaded as an artifact. |
+| **build** | every push and PR | Builds the Docker image and runs `docker/smoke-test.sh` on it. Outside PRs it pushes the tested image as `ghcr.io/<owner>/lean-tradezero:sha-<commit>`. |
+| **publish** | `main` and `v*` tags | Promotes that exact image to `:latest`, `:lean-<lean version>` and `:<tag>` with a registry-side retag. Nothing is rebuilt. |
+
+- **No TradeZero credentials in CI:** the paper-API tests (category `Paper`) are run locally only (see above).
+- **Image access:** the first push creates a private package. Make it public, or grant access, under *Packages* on GitHub.
+- **Manual runs** (*Run workflow*) can pick another LEAN git ref and base image.
+- **Disk space:** the LEAN image is about 27 GB, so each job first frees disk space on the hosted runner.
+
 ## Not supported (yet)
 
 Locates and hard-to-borrow shorts, options, WebSocket streams, trailing stops, MarketOnClose, GoodTilDate, fractional shares, and selecting this brokerage from lean-cli (`lean live` would need a lean-cli PR).
