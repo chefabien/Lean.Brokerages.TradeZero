@@ -1,0 +1,86 @@
+{
+  // LEAN live trading through TradeZero. Mount this file and start the engine with:
+  //   --config /config/config.json
+  // Lean accepts comments in this file.
+  "environment": "live-tradezero",
+
+  // ---------------------------------------------------------------- algorithm (mounted at /Algorithm)
+  "algorithm-type-name": "MyAlgorithm",
+  "algorithm-language": "Python",
+  "algorithm-location": "/Algorithm/main.py",
+  //"algorithm-language": "CSharp",
+  //"algorithm-location": "/Algorithm/MyAlgorithm.dll",
+
+  // ---------------------------------------------------------------- market data (chosen at runtime)
+  // TradeZero has no market data API: Lean needs a data-queue-handler from another plugin.
+  // Put that plugin's DLLs (and their dependencies) in a host folder mounted at /Lean/plugins and
+  // name its class below, e.g. a QuantConnect data source or brokerage that implements IDataQueueHandler.
+  "plugin-directory": "/Lean/plugins",
+  "data-queue-handler": [ "REPLACE-WITH-YOUR-DATA-QUEUE-HANDLER" ],
+  "history-provider": [ "QuantConnect.Lean.Engine.HistoricalData.SubscriptionDataReaderHistoryProvider" ],
+
+  // ---------------------------------------------------------------- TradeZero
+  // "paper" (default) only connects to an account of type Paper; "live" only to a non-paper account.
+  "tradezero-environment": "paper",
+  "tradezero-api-url": "https://webapi.tradezero.com",
+  // Leave the keys empty to read them from the TZ_API_KEY_ID / TZ_API_SECRET_KEY environment variables.
+  "tradezero-api-key-id": "",
+  "tradezero-api-secret-key": "",
+  // Needed only when the keys give access to several accounts.
+  "tradezero-account-id": "",
+  // Route for orders (live). Empty: none on paper, SMART on live.
+  "tradezero-route": "",
+  // JSON-lines log of every API exchange (keys masked). Empty to disable.
+  "tradezero-api-log-file": "/Results/tradezero-api.jsonl",
+  "tradezero-api-log-max-mb": 50,
+  "tradezero-api-log-bodies": true,
+  // Polling (REST only): orders while working / idle, P&L+account, position check.
+  "tradezero-poll-active-ms": 1000,
+  "tradezero-poll-idle-ms": 5000,
+  "tradezero-poll-account-ms": 5000,
+  "tradezero-reconcile-seconds": 30,
+  // Brokerage model: margin or cash, leverage (check the account's allowed leverage), commissions.
+  "tradezero-account-type": "margin",
+  "tradezero-intraday-leverage": 4,
+  "tradezero-overnight-leverage": 2,
+  "tradezero-fee-per-order": 0,
+  "tradezero-fee-per-share": 0,
+
+  // ---------------------------------------------------------------- engine
+  "data-folder": "/Lean/Data/",
+  "results-destination-folder": "/Results",
+  "debugging": false,
+  "log-handler": "QuantConnect.Logging.CompositeLogHandler",
+  "messaging-handler": "QuantConnect.Messaging.Messaging",
+  "job-queue-handler": "QuantConnect.Queues.JobQueue",
+  "api-handler": "QuantConnect.Api.Api",
+  "map-file-provider": "QuantConnect.Data.Auxiliary.LocalDiskMapFileProvider",
+  "factor-file-provider": "QuantConnect.Data.Auxiliary.LocalDiskFactorFileProvider",
+  "data-provider": "QuantConnect.Lean.Engine.DataFeeds.DefaultDataProvider",
+  "data-channel-provider": "DataChannelProvider",
+  "object-store": "QuantConnect.Lean.Engine.Storage.LocalObjectStore",
+  "data-aggregator": "QuantConnect.Lean.Engine.DataFeeds.AggregationManager",
+  "symbol-minute-limit": 10000,
+  "symbol-second-limit": 10000,
+  "symbol-tick-limit": 10000,
+  "ignore-unknown-asset-holdings": true,
+  "maximum-warmup-history-days-look-back": 5,
+  "job-user-id": "0",
+  "api-access-token": "",
+  "job-organization-id": "",
+  "live-cash-balance": "",
+  "live-holdings": "[]",
+  "python-additional-paths": [],
+
+  "environments": {
+    "live-tradezero": {
+      "live-mode": true,
+      "live-mode-brokerage": "TradeZeroBrokerage",
+      "setup-handler": "QuantConnect.Lean.Engine.Setup.BrokerageSetupHandler",
+      "result-handler": "QuantConnect.Lean.Engine.Results.LiveTradingResultHandler",
+      "data-feed-handler": "QuantConnect.Lean.Engine.DataFeeds.LiveTradingDataFeed",
+      "real-time-handler": "QuantConnect.Lean.Engine.RealTime.LiveTradingRealTimeHandler",
+      "transaction-handler": "QuantConnect.Lean.Engine.TransactionHandlers.BrokerageTransactionHandler"
+    }
+  }
+}

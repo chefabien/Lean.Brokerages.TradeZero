@@ -14,6 +14,7 @@ When the real API and the mock disagree, fix the mock and update this file.
 - [docs] DELETE of a single order without auth returns 401 JSON `{"statusCode":"Unauthorized","message":"Token not provided","detail":null}`.
 - [mock] Any `TZ-API-KEY-ID` value is valid, and the secret is ignored. Each key value is its own isolated session. The account id is `TZP` + the first 5 hex characters of sha1(key), uppercased.
 - [mock] Rate limits are not enforced. The real API returns a bare 429 with no body or headers.
+- [paper] A second `GET /positions` 140 ms after the first returned 429, although the docs give `/positions` and `/pnl` 3/s with a burst of 3 (2026-11-20). The connector spaces `/pnl` and `/positions` calls by 350 ms and retries 429s after 1.5 s.
 
 ## Errors
 - [paper] Wrong account in a path returns 400 JSON `{"statusCode":"BadRequest","message":"<Operation>","detail":"<acc> - <wrong> - ASLib Account for User was not found, or User doesn't have entitlements."}`. The `<Operation>` value seen is `GetPositions`. The mock derives it from the endpoint (e.g. `GetAccount`, `GetPnl`, `GetOrders`).
@@ -48,6 +49,7 @@ When the real API and the mock disagree, fix the mock and update this file.
   - A later GET shows `New` with `text:"TRAFIX_SIM"`, and fills keep `text:"TRAFIX_SIM"`.
   - A market order is `Filled` in under 300 ms. On a filled Market order, `limitPrice` is set to the fill price, or about +0.02 on buys. The mock sets it to the fill price.
 - [paper] Order row fields: `accountId, canceledQuantity, clientOrderId, executed, lastPrice, lastQuantity, lastUpdated, leavesQuantity, legCount:0, legs:null, limitPrice, maintenanceRequirement:0, marginRequirement:0, maxDisplayQuantity:0, openClose, orderQuantity, orderStatus, orderType, pegDifference:0, pegOffsetType:"Price", priceAvg, priceStop, route, securityType, side, startTime, strikePrice:0, symbol, text, timeInForce, tradedSymbol`.
+- [paper] A client-chosen `clientOrderId` such as `LN1120141028.1.1` (letters, digits, dots) is accepted and echoed back (2026-11-20).
 - [paper] Without a `clientOrderId`, the server generates one like `1119033049007.249`. The mock uses `MMDDhhmmssfff.<seq>` from the virtual clock, with a 12-hour `hh`.
 - [paper] If `openClose` is missing, it defaults to `"Open"`. `orderQuantity` may be sent as a numeric string.
 - [paper] A rejected order has `canceledQuantity = orderQuantity` and `leavesQuantity = 0`.

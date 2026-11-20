@@ -1,0 +1,44 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <Configuration Condition=" '$(Configuration)' == '' ">Release</Configuration>
+        <Platform Condition=" '$(Platform)' == '' ">AnyCPU</Platform>
+        <TargetFramework>net10.0</TargetFramework>
+
+        <IsPackable>false</IsPackable>
+        <TestProjectType>UnitTest</TestProjectType>
+        <OutputPath>bin\$(Configuration)\</OutputPath>
+        <Product>QuantConnect.Brokerages.TradeZero.Tests</Product>
+        <AssemblyName>QuantConnect.Brokerages.TradeZero.Tests</AssemblyName>
+        <RootNamespace>QuantConnect.Brokerages.TradeZero.Tests</RootNamespace>
+        <AssemblyTitle>QuantConnect.Brokerages.TradeZero.Tests</AssemblyTitle>
+        <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+        <LeanSourceDir Condition=" '$(LeanSourceDir)' == '' ">$(MSBuildThisFileDirectory)..\..\Lean\</LeanSourceDir>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <PackageReference Include="Newtonsoft.Json" Version="13.0.2" />
+        <PackageReference Include="NUnit" Version="4.2.2" />
+        <PackageReference Include="NUnit3TestAdapter" Version="4.6.0">
+            <PrivateAssets>all</PrivateAssets>
+        </PackageReference>
+        <PackageReference Include="Microsoft.NET.Test.Sdk" Version="16.9.4" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <Using Include="NUnit.Framework.Legacy.ClassicAssert" Alias="Assert" />
+        <Using Include="NUnit.Framework.Legacy.StringAssert" Alias="StringAssert" />
+        <Using Include="NUnit.Framework.Legacy.CollectionAssert" Alias="CollectionAssert" />
+    </ItemGroup>
+    <ItemGroup>
+      <ProjectReference Include="$(LeanSourceDir)Tests\QuantConnect.Tests.csproj" />
+      <ProjectReference Include="..\QuantConnect.TradeZeroBrokerage\QuantConnect.TradeZeroBrokerage.csproj" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <None Remove="config.json" />
+        <Content Include="config.json">
+            <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+        </Content>
+    </ItemGroup>
+</Project>

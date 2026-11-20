@@ -1,0 +1,23 @@
+{
+  "name": "Lean TradeZero Brokerage",
+  "dockerComposeFile": "docker-compose.yml",
+  "service": "dev",
+  "runServices": ["dev", "tzmock"],
+  "workspaceFolder": "/workspaces/lean-dev/Lean.Brokerages.TradeZero",
+  "remoteUser": "dev",
+  "shutdownAction": "stopCompose",
+  "postCreateCommand": "bash .devcontainer/post-create.sh",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-dotnettools.csdevkit",
+        "ms-python.python",
+        "eamodio.gitlens"
+      ],
+      "settings": {
+        "dotnet.defaultSolution": "QuantConnect.TradeZeroBrokerage.sln"
+      }
+    }
+  },
+  "forwardPorts": ["tzmock:8000"]
+}

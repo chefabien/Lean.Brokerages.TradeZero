@@ -1,0 +1,51 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Configuration Condition=" '$(Configuration)' == '' ">Release</Configuration>
+    <Platform Condition=" '$(Platform)' == '' ">AnyCPU</Platform>
+    <TargetFramework>net10.0</TargetFramework>
+    <Product>QuantConnect.Brokerages.TradeZero</Product>
+    <AssemblyName>QuantConnect.Brokerages.TradeZero</AssemblyName>
+    <RootNamespace>QuantConnect.Brokerages.TradeZero</RootNamespace>
+    <AssemblyTitle>QuantConnect.Brokerages.TradeZero</AssemblyTitle>
+    <OutputType>Library</OutputType>
+    <OutputPath>bin\$(Configuration)\</OutputPath>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+    <Description>QuantConnect LEAN TradeZero Brokerage: TradeZero (REST API) brokerage plugin for Lean</Description>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+    <!-- Lean source checkout, used when LeanBinDir is not set (development, tests) -->
+    <LeanSourceDir Condition=" '$(LeanSourceDir)' == '' ">$(MSBuildThisFileDirectory)..\..\Lean\</LeanSourceDir>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|AnyCPU' ">
+    <DebugType>full</DebugType>
+    <OutputPath>bin\Debug\</OutputPath>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Release|AnyCPU' ">
+    <DebugType>pdbonly</DebugType>
+    <OutputPath>bin\Release\</OutputPath>
+  </PropertyGroup>
+
+  <!--
+    Two ways to resolve Lean:
+    - LeanBinDir set (Docker image build): compile against the exact Lean binaries shipped in the
+      quantconnect/lean image, so the plugin can never mismatch the engine it is loaded into.
+    - otherwise: project references to the Lean source checkout next to this repository (../Lean).
+  -->
+  <PropertyGroup Condition=" '$(LeanBinDir)' == '' ">
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+  </PropertyGroup>
+  <ItemGroup Condition=" '$(LeanBinDir)' == '' ">
+    <Compile Include="$(LeanSourceDir)Common\Properties\SharedAssemblyInfo.cs" Link="Properties\SharedAssemblyInfo.cs" />
+    <ProjectReference Include="$(LeanSourceDir)Brokerages\QuantConnect.Brokerages.csproj" />
+  </ItemGroup>
+  <ItemGroup Condition=" '$(LeanBinDir)' != '' ">
+    <Reference Include="QuantConnect.Common"><HintPath>$(LeanBinDir)/QuantConnect.Common.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="QuantConnect.Brokerages"><HintPath>$(LeanBinDir)/QuantConnect.Brokerages.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="QuantConnect.Configuration"><HintPath>$(LeanBinDir)/QuantConnect.Configuration.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="QuantConnect.Logging"><HintPath>$(LeanBinDir)/QuantConnect.Logging.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Newtonsoft.Json"><HintPath>$(LeanBinDir)/Newtonsoft.Json.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="NodaTime"><HintPath>$(LeanBinDir)/NodaTime.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Python.Runtime"><HintPath>$(LeanBinDir)/Python.Runtime.dll</HintPath><Private>false</Private></Reference>
+  </ItemGroup>
+</Project>

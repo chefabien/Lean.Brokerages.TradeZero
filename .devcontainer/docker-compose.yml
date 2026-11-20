@@ -1,0 +1,44 @@
+# Dev container (service `dev`) + a running tz-mock (service `tzmock`).
+#
+# The csproj files reference Lean as a sibling checkout (../Lean), so the PARENT folder of this
+# repository is mounted at /workspaces/lean-dev. post-create.sh clones Lean there if it is missing.
+#
+# Without VS Code:  docker compose -f .devcontainer/docker-compose.yml up -d
+#                   docker compose -f .devcontainer/docker-compose.yml exec dev bash
+name: lean-tradezero
+
+services:
+  dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        LEAN_IMAGE: ${LEAN_IMAGE:-quantconnect/lean:latest}
+        USER_UID: ${LOCAL_UID:-1000}
+        USER_GID: ${LOCAL_GID:-1000}
+    user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
+    working_dir: /workspaces/lean-dev/Lean.Brokerages.TradeZero
+    volumes:
+      - ../..:/workspaces/lean-dev
+      - nuget:/home/dev/.nuget/packages
+    environment:
+      HOME: /home/dev
+      TZ_MOCK_URL: http://tzmock:8000
+      # Paper tests only (explicit). Passed through from the host, never written to disk.
+      TZ_API_KEY_ID: ${TZ_API_KEY_ID:-}
+      TZ_API_SECRET_KEY: ${TZ_API_SECRET_KEY:-}
+    depends_on:
+      tzmock:
+        condition: service_healthy
+
+  tzmock:
+    build:
+      context: ../tz-mock
+    volumes:
+      # live code: restart the service to pick up tz-mock edits
+      - ../tz-mock:/app:ro
+    ports:
+      - "127.0.0.1:${TZ_MOCK_PORT:-8000}:8000"
+
+volumes:
+  nuget:

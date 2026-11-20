@@ -1,0 +1,24 @@
+{
+    "description": "TradeZero is a US broker for active stock traders, with free API access. This integration uses the TradeZero REST API: US stocks, long and short (easy to borrow), paper and live accounts.",
+    "platforms-features": [
+        {
+            "Platforms": ["Cloud Platform", "Local Platform", "LEAN CLI"],
+            "Download Data": [0, 0, 0],
+            "Backtesting": [0, 1, 1],
+            "Optimization": [0, 1, 1],
+            "Live Trading": [0, 1, 1]
+        }
+    ],
+    "order-types": ["Market", "Limit", "Stop Market", "Stop Limit", "Market On Open"],
+    "assets": ["Equity"],
+    "brokerage-url": "https://www.tradezero.com",
+    "documentation": "https://developer.tradezero.com/docs/TradeZeroAPI/tradezero-developer-api",
+    "module-specification": {
+        "download": {
+            "data-types": [],
+            "resolutions": [],
+            "security-types": [],
+            "markets": []
+        }
+    }
+}
