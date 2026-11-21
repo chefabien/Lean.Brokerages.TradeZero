@@ -15,7 +15,9 @@ The data feed's own keys go into config.json (mode 0600): LEAN only reads them f
 QuantConnect's data feed modules (Polygon, Databento, Alpaca) check at startup that your QuantConnect account
 is entitled to them, as they do under lean-cli. The launcher therefore also writes your QuantConnect user id,
 API token and organization id into config.json (from QC_USER_ID / QC_API_ACCESS_TOKEN / QC_ORGANIZATION_ID,
-or from lean-cli's ~/.lean/credentials and a workspace lean.json given with --lean-json).
+or from lean-cli's ~/.lean/credentials and the lean.json of a workspace given with --workspace).
+With --workspace, the workspace's data folder (lean.json "data-folder", map and factor files included) is
+mounted at /Lean/Data instead of the sample data inside the image, as lean-cli does.
 
 Python 3.9+, standard library only. Needs docker on the PATH.
 """
@@ -209,6 +211,7 @@ def build_config(template: dict, feed: Feed, feed_values: dict, *, algorithm_nam
         "algorithm-language": "Python" if language == "python" else "CSharp",
         "algorithm-location": algorithm_location,
         "plugin-directory": "/Lean/plugins",
+        "object-store-root": "/Storage",  # the object store, mounted read-write like lean-cli does
         "data-queue-handler": [feed.data_queue_handler],
         "history-provider": [feed.history_provider],
         "tradezero-environment": environment,
@@ -255,8 +258,27 @@ def format_command(command: list[str], indent: str = "  ") -> list[str]:
     return [rendered[0]] + [indent + line for line in rendered[1:]]
 
 
-def docker_command(lean_version: int, *, config: Path, plugins: Path, algorithm: Path, results: Path,
-                   container_name: str, network: str | None, tty: bool) -> list[str]:
+@dataclass(frozen=True)
+class Workspace:
+    settings: dict  # its lean.json
+    data: Path      # its data folder
+
+
+def read_workspace(folder: Path) -> Workspace:
+    """A lean-cli workspace (the folder `lean init` created): its lean.json and its data folder."""
+    lean_json = folder / "lean.json"
+    if not lean_json.is_file():
+        raise LauncherError(f"{folder} is not a lean-cli workspace: it has no lean.json")
+    settings = json.loads(strip_json_comments(lean_json.read_text(encoding="utf-8")))
+    data = folder / settings.get("data-folder", "data")
+    if not data.is_dir():
+        raise LauncherError(f"The workspace data folder {data} (lean.json \"data-folder\") does not exist")
+    return Workspace(settings, data.resolve())
+
+
+def docker_command(lean_version: int, *, config: Path, plugins: Path, algorithm: Path, results: Path, storage: Path,
+                   container_name: str, network: str | None, tty: bool, data: Path | None = None,
+                   extra_env: list[str] = ()) -> list[str]:
     command = ["docker", "run", "--rm"]
     if tty:
         command.append("-it")
@@ -268,7 +290,17 @@ def docker_command(lean_version: int, *, config: Path, plugins: Path, algorithm:
         "-v", f"{plugins}:/Lean/plugins:ro",
         "-v", f"{algorithm}:/Algorithm:ro",
         "-v", f"{results}:/Results",
+        "-v", f"{storage}:/Storage",
+    ]
+    if data:
+        # the workspace data replaces the image's /Lean/Data (the config's "data-folder"), as under lean-cli
+        command += ["-v", f"{data}:/Lean/Data"]
+    command += [
         "-e", "TZ_API_KEY_ID", "-e", "TZ_API_SECRET_KEY",
+    ]
+    for name in extra_env:  # names only: docker takes each value from the environment run.sh starts in
+        command += ["-e", name]
+    command += [
         f"{LEAN_IMAGE_REPO}:{lean_version}",
         "--config", "/config/config.json",
     ]
@@ -517,15 +549,14 @@ def ask_feed_settings(feed: Feed, interactive: bool) -> dict:
     return values
 
 
-def quantconnect_account(lean_json: Path | None, interactive: bool, credentials_file: Path = QC_CREDENTIALS_FILE) -> dict:
+def quantconnect_account(workspace: dict | None, interactive: bool, credentials_file: Path = QC_CREDENTIALS_FILE) -> dict:
     """job-user-id / api-access-token / job-organization-id from the environment, else from lean-cli's files
     (~/.lean/credentials after `lean login`, and the organization from a lean-cli workspace's lean.json),
     else asked for."""
     sources: dict = {}
     if credentials_file.exists():
         sources.update(json.loads(credentials_file.read_text(encoding="utf-8")))
-    if lean_json:
-        workspace = json.loads(strip_json_comments(lean_json.read_text(encoding="utf-8")))
+    if workspace:
         organization = workspace.get("job-organization-id") or workspace.get("organization-id")
         if organization:
             sources["job-organization-id"] = organization
@@ -537,9 +568,27 @@ def quantconnect_account(lean_json: Path | None, interactive: bool, credentials_
             value = ask(f"QuantConnect {key}: ").strip()
         if not value:
             raise LauncherError(f"{key} is required by QuantConnect's data feed modules: set {env}, run `lean login`"
-                                f"{' and pass --lean-json' if key == 'job-organization-id' else ''}, or run interactively")
+                                f"{' and pass --workspace' if key == 'job-organization-id' else ''}, or run interactively")
         values[key] = str(value)
     return values
+
+
+ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def parse_extra_env(items: list[str]) -> list[str]:
+    """--extra-env NAME[,NAME...] (repeatable): the variable names, in order, without duplicates."""
+    names: list[str] = []
+    for item in items or []:
+        for name in filter(None, (n.strip() for n in item.split(","))):
+            if "=" in name:
+                raise LauncherError(f"--extra-env takes variable names, not values ({name.split('=')[0]}=...): "
+                                    "export the variable and pass its name")
+            if not ENV_NAME.match(name):
+                raise LauncherError(f"--extra-env: {name!r} is not an environment variable name")
+            if name not in names and name not in ("TZ_API_KEY_ID", "TZ_API_SECRET_KEY"):
+                names.append(name)
+    return names
 
 
 def parse_extra(items: list[str]) -> dict:
@@ -576,8 +625,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--repo", help="GitHub repository publishing the plugin (owner/name)")
     parser.add_argument("--out", type=Path, default=Path("tradezero-run"), help="Output folder (default ./tradezero-run)")
     parser.add_argument("--cache", type=Path, default=Path.home() / ".cache" / "lean-tradezero")
-    parser.add_argument("--lean-json", type=Path,
-                        help="A lean-cli workspace lean.json to read the QuantConnect organization id from")
+    parser.add_argument("--workspace", type=Path,
+                        help="lean-cli workspace: the QuantConnect organization id comes from its lean.json, and its "
+                             "data folder (map and factor files, ...) is mounted at /Lean/Data")
+    parser.add_argument("--extra-env", action="append", metavar="NAME[,NAME...]",
+                        help="Pass these environment variables through to the Lean container (names only: the values "
+                             "come from the environment run.sh starts in; repeatable)")
     parser.add_argument("--container-name", default="lean-tradezero")
     parser.add_argument("--set", action="append", metavar="KEY=VALUE",
                         help="Extra Lean config value (repeatable), e.g. --set tradezero-intraday-leverage=1")
@@ -611,6 +664,11 @@ def main(argv: list[str]) -> int:
         raise LauncherError(f"{algorithm / algorithm_file} not found")
     if not algorithm_name:
         raise LauncherError("Cannot detect the algorithm class: use --algorithm-name")
+
+    extra_env = parse_extra_env(args.extra_env)
+    workspace = read_workspace(args.workspace.expanduser().resolve()) if args.workspace else None
+    if workspace:
+        log(f"data: {workspace.data}")
 
     cache = args.cache.expanduser().resolve()
     local = local_lean_images()
@@ -647,7 +705,7 @@ def main(argv: list[str]) -> int:
     interactive = sys.stdin.isatty()
     feed_values = feed_config_values(feed, ask_feed_settings(feed, interactive))
     if feed.needs_quantconnect_account:
-        feed_values.update(quantconnect_account(args.lean_json, interactive))
+        feed_values.update(quantconnect_account(workspace.settings if workspace else None, interactive))
     location = f"/Algorithm/{algorithm_file}"
     config = build_config(template, feed, feed_values, algorithm_name=algorithm_name, language=args.language,
                           algorithm_location=location, environment=args.environment,
@@ -655,14 +713,19 @@ def main(argv: list[str]) -> int:
 
     out = args.out.resolve()
     (out / "results").mkdir(parents=True, exist_ok=True)
+    # the object store: the workspace's storage folder, as under lean-cli, else one next to run.sh
+    storage = (args.workspace.expanduser().resolve() if workspace else out) / "storage"
+    storage.mkdir(parents=True, exist_ok=True)
+    log(f"object store: {storage}")
     config_path = out / "config.json"
     fd = os.open(config_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         json.dump(config, f, indent=2)
     os.chmod(config_path, 0o600)
 
-    paths = dict(config=config_path, plugins=plugins, algorithm=algorithm, results=out / "results",
-                 container_name=args.container_name, network=args.docker_network)
+    paths = dict(config=config_path, plugins=plugins, algorithm=algorithm, results=out / "results", storage=storage,
+                 container_name=args.container_name, network=args.docker_network,
+                 data=workspace.data if workspace else None, extra_env=extra_env)
     run_sh = out / "run.sh"
     # run.sh adds -it only when started from a terminal, so it also works in scripts and CI
     lines = format_command(docker_command(version, tty=False, **paths))

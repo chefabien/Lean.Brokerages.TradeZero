@@ -135,8 +135,7 @@ class QuantConnectAccountTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.credentials = Path(self.tmp.name) / "credentials"
         self.credentials.write_text(json.dumps({"user-id": "123", "api-token": "file-token"}))
-        self.lean_json = Path(self.tmp.name) / "lean.json"
-        self.lean_json.write_text('{\n  // lean-cli workspace\n  "job-organization-id": "org-from-workspace"\n}')
+        self.workspace = {"job-organization-id": "org-from-workspace"}
 
     def tearDown(self):
         for key, value in self.saved.items():
@@ -147,7 +146,7 @@ class QuantConnectAccountTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_reads_lean_cli_files(self):
-        values = tz.quantconnect_account(self.lean_json, False, self.credentials)
+        values = tz.quantconnect_account(self.workspace, False, self.credentials)
         self.assertEqual({"job-user-id": "123", "api-access-token": "file-token",
                           "job-organization-id": "org-from-workspace"}, values)
 
@@ -176,11 +175,60 @@ class MiscTests(unittest.TestCase):
 
     def test_docker_command_uses_a_fixed_tag_and_no_secrets(self):
         command = tz.docker_command(18274, config=Path("/o/config.json"), plugins=Path("/c/p"), algorithm=Path("/a"),
-                                    results=Path("/o/results"), container_name="lean-tradezero", network=None, tty=True)
+                                    results=Path("/o/results"), storage=Path("/w/storage"), container_name="lean-tradezero", network=None, tty=True)
         self.assertIn("quantconnect/lean:18274", command)
         self.assertNotIn("latest", " ".join(command))
         self.assertIn("TZ_API_KEY_ID", command)
         self.assertFalse(any("=" in c for c in command if c.startswith("TZ_")))
+
+    def test_read_workspace(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            with self.assertRaisesRegex(tz.LauncherError, "no lean.json"):
+                tz.read_workspace(folder)
+            (folder / "lean.json").write_text('{\n  // lean-cli\n  "data-folder": "my-data",\n  "organization-id": "o"\n}')
+            with self.assertRaisesRegex(tz.LauncherError, "does not exist"):
+                tz.read_workspace(folder)
+            (folder / "my-data").mkdir()
+            workspace = tz.read_workspace(folder)
+            self.assertEqual((folder / "my-data").resolve(), workspace.data)
+            self.assertEqual("o", workspace.settings["organization-id"])
+            (folder / "lean.json").write_text("{}")
+            (folder / "data").mkdir()
+            self.assertEqual((folder / "data").resolve(), tz.read_workspace(folder).data)
+
+    def test_docker_command_mounts_the_object_store_read_write(self):
+        command = tz.docker_command(18274, config=Path("/o/config.json"), plugins=Path("/c/p"), algorithm=Path("/a"),
+                                    results=Path("/o/results"), storage=Path("/w/storage"),
+                                    container_name="lean-tradezero", network=None, tty=False)
+        self.assertIn("/w/storage:/Storage", command)  # no :ro
+        self.assertEqual("/Storage", tz.build_config({}, tz.FEEDS["fake"], {}, algorithm_name="A", language="python",
+                                                     algorithm_location="/Algorithm/main.py", environment="paper",
+                                                     api_url=None, extra={})["object-store-root"])
+
+    def test_docker_command_mounts_the_workspace_data(self):
+        kwargs = dict(config=Path("/o/config.json"), plugins=Path("/c/p"), algorithm=Path("/a"),
+                      results=Path("/o/results"), storage=Path("/w/storage"), container_name="lean-tradezero", network=None, tty=False)
+        self.assertNotIn("/Lean/Data", " ".join(tz.docker_command(18274, **kwargs)))
+        command = tz.docker_command(18274, data=Path("/w/data"), **kwargs)
+        self.assertIn("/w/data:/Lean/Data", command)
+        self.assertLess(command.index("/w/data:/Lean/Data"), command.index("quantconnect/lean:18274"))
+
+    def test_parse_extra_env(self):
+        self.assertEqual([], tz.parse_extra_env(None))
+        self.assertEqual(["A", "B_2", "C"], tz.parse_extra_env(["A,B_2", " C ,A", "TZ_API_KEY_ID"]))
+        with self.assertRaisesRegex(tz.LauncherError, "names, not values"):
+            tz.parse_extra_env(["SECRET=value"])
+        with self.assertRaisesRegex(tz.LauncherError, "not an environment variable name"):
+            tz.parse_extra_env(["1BAD"])
+
+    def test_docker_command_passes_extra_env_by_name(self):
+        command = tz.docker_command(18274, config=Path("/o/config.json"), plugins=Path("/c/p"), algorithm=Path("/a"),
+                                    results=Path("/o/results"), storage=Path("/w/storage"), container_name="lean-tradezero", network=None,
+                                    tty=False, extra_env=["MASSIVE_API_KEY"])
+        index = command.index("MASSIVE_API_KEY")
+        self.assertEqual("-e", command[index - 1])
+        self.assertLess(index, command.index("quantconnect/lean:18274"))
 
     def test_feeds_offered(self):
         self.assertEqual({"polygon", "databento", "alpaca", "fake"}, set(tz.FEEDS))

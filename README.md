@@ -122,7 +122,7 @@ docker compose -f .devcontainer/docker-compose.yml exec -e TZ_API_KEY_ID -e TZ_A
 The plugin is distributed as a GitHub Release asset, `tradezero-plugin-lean<V>.zip`. Each asset is built for one LEAN version `<V>`. It runs on the **official `quantconnect/lean:<V>` image**, at a fixed tag, never `latest`. [tradezero_live.py](tradezero_live.py) (Python 3, standard library only) assembles a run:
 
 ```bash
-python3 tradezero_live.py --data-feed polygon --algorithm ./MyAlgorithm --lean-json ~/qc_workspace/lean.json
+python3 tradezero_live.py --data-feed polygon --algorithm ./MyAlgorithm --workspace ~/qc_workspace
 ```
 
 1. **LEAN version.** It reads the version of your local `quantconnect/lean` image and uses it if a plugin release asset exists for that version or an older one. If every asset is newer than your image, or you have no local image, it uses the newest LEAN version an asset exists for, and pulls that fixed tag.
@@ -137,9 +137,12 @@ python3 tradezero_live.py --data-feed polygon --algorithm ./MyAlgorithm --lean-j
 | `alpaca` | `QuantConnect.Brokerages.Alpaca` | `ALPACA_API_KEY`, `ALPACA_API_SECRET`, `ALPACA_ENVIRONMENT` (paper/live) |
 | `fake` | built into LEAN | none; random prices, **testing only** |
 
-- **QuantConnect account required for real feeds.** QuantConnect's feed modules check at startup, through the QuantConnect API, that your QuantConnect account is entitled to them, just as under lean-cli. The launcher reads your user id and API token from `QC_USER_ID` / `QC_API_ACCESS_TOKEN`, or from lean-cli's `~/.lean/credentials` (after `lean login`). It reads your organization id from `QC_ORGANIZATION_ID`, or from a lean-cli workspace `lean.json` given with `--lean-json`.
+- **QuantConnect account required for real feeds.** QuantConnect's feed modules check at startup, through the QuantConnect API, that your QuantConnect account is entitled to them, just as under lean-cli. The launcher reads your user id and API token from `QC_USER_ID` / `QC_API_ACCESS_TOKEN`, or from lean-cli's `~/.lean/credentials` (after `lean login`). It reads your organization id from `QC_ORGANIZATION_ID`, or from the `lean.json` of a lean-cli workspace given with `--workspace`.
 - **TradeZero keys are never written to a file:** `run.sh` passes `TZ_API_KEY_ID` / `TZ_API_SECRET_KEY` from your environment. The feed's keys and the QuantConnect token go into `config.json`, which only you can read, because LEAN reads them only from its config.
 - **Private repository:** the launcher finds the repository with `--repo owner/name` (or `TZ_PLUGIN_REPO`, or the `origin` remote). For a private repository it needs a token: `GITHUB_TOKEN`, or `gh auth login`.
+- **Data folder (map and factor files):** with `--workspace`, the workspace's data folder (`data-folder` in its `lean.json`, `data/` by default) is mounted at `/Lean/Data`, as lean-cli does, so LEAN uses its map files, factor files and market-hours database. Without it, LEAN uses the sample data inside the image, which covers few tickers and is dated.
+- **Object store:** the `storage/` folder of the workspace (as under lean-cli), or `tradezero-run/storage/` without `--workspace`, is mounted read-write at `/Storage` (`object-store-root`), so what the algorithm saves to `ObjectStore` persists between runs.
+- **Extra environment variables:** `--extra-env NAME[,NAME...]` (repeatable) passes these variables through to the LEAN container, for example a key your algorithm reads. `run.sh` holds only the names; the values come from the environment you start it in.
 - **Other options:** `--lean-version`, `--plugin-version <tag>`, `--environment live`, `--set key=value` for any LEAN config value (for example `--set tradezero-intraday-leverage=1`), `--plugin-zip` (use a local build), and `--help`.
 
 [smoke-test/smoke-test.sh](smoke-test/smoke-test.sh) checks a zip end to end against tz-mock, with the `fake` feed: it reads the account from Python, then places and cancels an order.
