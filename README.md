@@ -128,7 +128,7 @@ python3 tradezero_live.py --data-feed polygon --algorithm ./MyAlgorithm --worksp
 1. **LEAN version.** It reads the version of your local `quantconnect/lean` image and uses it if a plugin release asset exists for that version or an older one. If every asset is newer than your image, or you have no local image, it uses the newest LEAN version an asset exists for, and pulls that fixed tag.
 2. **TradeZero plugin.** Like the data feeds, it takes the asset built for that LEAN version or the closest older one, and says so when it isn't an exact match. It downloads the asset if it isn't cached (`~/.cache/lean-tradezero`) and checks its `.sha256`.
 3. **Data feed.** It fetches the feed from nuget.org, using the newest build not newer than that LEAN version. Only the files the LEAN image doesn't already contain are kept.
-4. **Output.** It writes `tradezero-run/config.json` (mode 0600) and `tradezero-run/run.sh`, and prints the `docker run` command. The plugins are mounted at `/Lean/plugins`.
+4. **Output.** It writes `tradezero-run/config.json` (mode 0600) and `tradezero-run/run.sh`, and prints the `docker run` command. The plugins are mounted at `/Lean/plugins`. Each start of `run.sh` writes LEAN's results (logs, charts, order events, `tradezero-api.jsonl`) to a new folder, `tradezero-run/results/<YYYY-MM-DD_HHMMSS>/` (local time), so runs don't mix.
 
 | `--data-feed` | Package | Keys (environment variables, otherwise asked) |
 |---|---|---|

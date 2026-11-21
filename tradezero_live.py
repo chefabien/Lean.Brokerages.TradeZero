@@ -8,6 +8,7 @@ The official quantconnect/lean image is used as is, at a fixed version tag. This
      or the closest older one, if needed;
   3. fetches the data feed plugin from nuget.org, built for that Lean version or the closest older one;
   4. writes config.json and run.sh in the output folder, and prints the docker command to start LEAN.
+     Each start writes its results to a new results/<YYYY-MM-DD_HHMMSS>/ folder (local time).
 
 TradeZero keys are never written: run.sh passes TZ_API_KEY_ID / TZ_API_SECRET_KEY from your environment.
 The data feed's own keys go into config.json (mode 0600): LEAN only reads them from its config.
@@ -276,7 +277,21 @@ def read_workspace(folder: Path) -> Workspace:
     return Workspace(settings, data.resolve())
 
 
-def docker_command(lean_version: int, *, config: Path, plugins: Path, algorithm: Path, results: Path, storage: Path,
+RESULTS_VAR = "${results}"  # docker_command's results for run.sh: the per-run folder results_setup sets
+
+
+def results_setup(base: Path) -> str:
+    """Shell line that creates a new timestamped results folder under base and sets $results to it."""
+    return f'results={shlex.quote(str(base))}/"$(date +%Y-%m-%d_%H%M%S)"\nmkdir -p "$results"'
+
+
+def shell_lines(command: list[str]) -> list[str]:
+    """format_command, with the results mount left to the shell so $results is expanded."""
+    quoted = shlex.quote(f"{RESULTS_VAR}:/Results")
+    return [line.replace(quoted, f'"{RESULTS_VAR}:/Results"') for line in format_command(command)]
+
+
+def docker_command(lean_version: int, *, config: Path, plugins: Path, algorithm: Path, results: Path | str, storage: Path,
                    container_name: str, network: str | None, tty: bool, data: Path | None = None,
                    extra_env: list[str] = ()) -> list[str]:
     command = ["docker", "run", "--rm"]
@@ -712,7 +727,7 @@ def main(argv: list[str]) -> int:
                           api_url=args.tradezero_api_url, extra=parse_extra(args.set))
 
     out = args.out.resolve()
-    (out / "results").mkdir(parents=True, exist_ok=True)
+    (out / "results").mkdir(parents=True, exist_ok=True)  # run.sh adds one folder per start under it
     # the object store: the workspace's storage folder, as under lean-cli, else one next to run.sh
     storage = (args.workspace.expanduser().resolve() if workspace else out) / "storage"
     storage.mkdir(parents=True, exist_ok=True)
@@ -723,12 +738,12 @@ def main(argv: list[str]) -> int:
         json.dump(config, f, indent=2)
     os.chmod(config_path, 0o600)
 
-    paths = dict(config=config_path, plugins=plugins, algorithm=algorithm, results=out / "results", storage=storage,
+    paths = dict(config=config_path, plugins=plugins, algorithm=algorithm, results=RESULTS_VAR, storage=storage,
                  container_name=args.container_name, network=args.docker_network,
                  data=workspace.data if workspace else None, extra_env=extra_env)
     run_sh = out / "run.sh"
     # run.sh adds -it only when started from a terminal, so it also works in scripts and CI
-    lines = format_command(docker_command(version, tty=False, **paths))
+    lines = shell_lines(docker_command(version, tty=False, **paths))
     lines[0] = lines[0].replace("docker run --rm", 'exec docker run --rm ${tty[@]+"${tty[@]}"}', 1)
     run_sh.write_text(
         "#!/usr/bin/env bash\n"
@@ -737,6 +752,8 @@ def main(argv: list[str]) -> int:
         ': "${TZ_API_KEY_ID:?export TZ_API_KEY_ID first}" "${TZ_API_SECRET_KEY:?export TZ_API_SECRET_KEY first}"\n'
         "tty=()\n"
         "if [ -t 0 ]; then tty=(-it); fi\n"
+        + results_setup(out / "results") + "\n"
+        'echo "results: $results" >&2\n'
         + " \\\n".join(lines) + "\n",
         encoding="utf-8")
     run_sh.chmod(0o700)
@@ -745,7 +762,8 @@ def main(argv: list[str]) -> int:
     log(f"config: {config_path} (mode 0600)")
     if not (os.environ.get("TZ_API_KEY_ID") and os.environ.get("TZ_API_SECRET_KEY")):
         log("export TZ_API_KEY_ID and TZ_API_SECRET_KEY before starting LEAN")
-    print(" \\\n".join(format_command(docker_command(version, tty=True, **paths))))
+    print(results_setup(out / "results"))
+    print(" \\\n".join(shell_lines(docker_command(version, tty=True, **paths))))
     log(f"or run: {run_sh}")
     return 0
 

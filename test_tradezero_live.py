@@ -230,6 +230,18 @@ class MiscTests(unittest.TestCase):
         self.assertEqual("-e", command[index - 1])
         self.assertLess(index, command.index("quantconnect/lean:18274"))
 
+    def test_run_sh_mounts_a_new_timestamped_results_folder(self):
+        import subprocess
+        setup = tz.results_setup(Path("/o/my run/results"))
+        self.assertIn("mkdir -p \"$results\"", setup)
+        folder = subprocess.run(["bash", "-c", setup.split("\n")[0] + '; echo "$results"'],
+                                capture_output=True, text=True, check=True).stdout.strip()
+        self.assertRegex(folder, r"^/o/my run/results/\d{4}-\d{2}-\d{2}_\d{6}$")
+        lines = tz.shell_lines(tz.docker_command(18274, config=Path("/o/config.json"), plugins=Path("/c/p"),
+                                                 algorithm=Path("/a"), results=tz.RESULTS_VAR, storage=Path("/w/storage"),
+                                                 container_name="lean-tradezero", network=None, tty=False))
+        self.assertIn('  -v "${results}:/Results"', lines)
+
     def test_feeds_offered(self):
         self.assertEqual({"polygon", "databento", "alpaca", "fake"}, set(tz.FEEDS))
 
