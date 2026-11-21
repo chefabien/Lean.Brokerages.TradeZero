@@ -288,3 +288,9 @@ Results/
 
 # plugin release build output
 dist/
+
+# launcher output (config.json holds feed keys and the QuantConnect token)
+tradezero-run/
+
+# editor settings
+.vscode/
