@@ -114,11 +114,14 @@ namespace QuantConnect.Brokerages.TradeZero.Tests
         }
 
         [Test]
-        public void ShortableProviderReflectsEasyToBorrow()
+        public void ShortableProviderLeavesHardToBorrowToTheBrokerage()
         {
             using var h = new TradeZeroHarness("short_htb");
+            // Lean cannot see the locate handler: the brokerage decides when the order arrives
             Assert.IsNull(TradeZeroShortableProvider.Instance.ShortableQuantity(Aapl, Now));
-            Assert.AreEqual(0, TradeZeroShortableProvider.Instance.ShortableQuantity(TradeZeroHarness.Equity("HTBX"), Now));
+            Assert.IsNull(TradeZeroShortableProvider.Instance.ShortableQuantity(TradeZeroHarness.Equity("HTBX"), Now));
+            Assert.AreEqual(true, TradeZeroLocates.IsEasyToBorrow(Aapl));
+            Assert.AreEqual(false, TradeZeroLocates.IsEasyToBorrow(TradeZeroHarness.Equity("HTBX")));
         }
 
         [Test]

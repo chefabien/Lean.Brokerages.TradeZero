@@ -6,7 +6,7 @@ TradeZero brokerage plugin for [QuantConnect LEAN](https://github.com/QuantConne
 | | |
 |---|---|
 | API | TradeZero REST API only (`https://webapi.tradezero.com/v1/api`). The WebSocket API is beta, so it is not used. Orders, fills and account figures are polled. |
-| Assets | US stocks, long and short. Short selling only for **easy-to-borrow** symbols (locates are not supported). Whole shares only. |
+| Assets | US stocks, long and short. Hard-to-borrow shorts through **locates** (see *Locates*). Whole shares only. |
 | Orders | Market, Limit, StopMarket, StopLimit, MarketOnOpen. Time in force: Day and GoodTilCanceled, plus TradeZero-only values through `TradeZeroOrderProperties`. |
 | Updates | Cancel-then-replace, because TradeZero has no modify endpoint. |
 | Safety | `tradezero-environment` defaults to `paper`. The brokerage refuses to connect if the account's `accountType` does not match. |
@@ -60,9 +60,55 @@ self.limit_order("AAPL", 10, 180.0, order_properties=props)
 Other fields: `available_cash`, `exposure`, `initial_margin`, `intraday_margin`, `margin_requirement`, `equity_ratio`, `day_pnl`, `day_realized`, `day_unrealized`, `total_unrealized`, `start_of_day_equity`, `trading_suspended`, `is_paper`, `pnl_updated_utc`, `account_updated_utc`.
 
 - The same object is also available as `TradeZeroBrokerageModel().account`.
-- `self.shortable(symbol, -qty)` uses TradeZero's easy-to-borrow check. Don't use `self.shortable_quantity(symbol)`: Lean reports "no limit" as 0 there.
+- `self.shortable(symbol, -qty)` is always True: the brokerage decides when the order arrives, because a hard-to-borrow short may be possible through a locate. Use `TradeZeroLocates.is_easy_to_borrow(symbol)` and `TradeZeroLocates.get_available(symbol)` for an exact check (see *Locates*).
 
 Lean's cash is set to `accountValue − Σ position market value`, so short-sale proceeds count as cash and Lean's total portfolio value equals TradeZero's account value. TradeZero's `availableCash` does not credit short proceeds.
+
+## Locates (hard-to-borrow shorts)
+
+Shorting a hard-to-borrow (HTB) symbol needs located shares. The brokerage checks TradeZero's easy-to-borrow answer (cached per day) before every order that opens or increases a short:
+
+| Situation | What happens |
+|---|---|
+| Easy to borrow, or the check failed | Sent as usual |
+| HTB, the account already holds enough located shares (any type) | Sent as usual, no new locate |
+| HTB, not enough located shares, no `LocateHandler` | `Invalid`: "HTBX is hard to borrow: shorting 150 needs 100 more located shares (50 held). Set TradeZeroOrderProperties.LocateHandler…" |
+| HTB, not enough located shares, a `LocateHandler` | `Submitted`, then the connector asks TradeZero for a quote of the missing shares (rounded up to a lot of 100), calls the handler with the offers, accepts the one it returns, and sends the order. Declined, refused, expired: `Invalid` with the reason |
+
+```python
+from QuantConnect.Brokerages.TradeZero import TradeZeroOrderProperties, TradeZeroLocates, TradeZeroLocateType
+
+def choose_locate(quote):
+    # quote.offers: 1 offer (ordinary HTB symbol) or 2 (Reg SHO symbol: PreBorrow and SingleUse), cheapest first
+    reusable = [o for o in quote.offers if o.reusable_after_cover and o.price_per_share <= 0.05]
+    return reusable[0] if reusable else None     # None declines every offer
+
+props = TradeZeroOrderProperties()
+props.locate_handler = choose_locate
+self.market_order("HTBX", -200, order_properties=props)
+```
+
+- **The handler** runs on a connector thread: keep it short, never place orders from it, and return one of `quote.offers` or `None` (anything else, or an exception, declines). Offers expire 30 s after they are made. Useful fields: `quote.short_quantity`, `already_located`, `requested_quantity`; per offer `type`, `quantity`, `price_per_share`, `total_cost`, `covers_order`, `reusable_after_cover`, `sell_back_after_use`, `expires_utc`.
+- **Locate types**: `LOCATE` (ordinary HTB symbols) and `PRE_BORROW` can be reused the same day after a cover, and their unused part can be sold back. `SINGLE_USE` is used up by the first short and can only be sold back if it was never used.
+- **Cost**: TradeZero charges the locate at the accept. The connector adds it to the fee of the order's first fill. A locate bought for an order that is then canceled stays in the inventory (`LocateUnused` message).
+- **Odd lots**: locates are sold in lots of 100. An HTB short that is not a multiple of 100 gets a `LocateOddLot` warning (set `suppress_odd_lot_locate_warning = True` to hide it) and goes ahead.
+- **While a locate is being bought** the order can be canceled (open offers are canceled too) but not updated. An update whose new quantity needs more located shares than held is refused: cancel and re-place, or call `TradeZeroLocates.locate` first.
+- **Messages** (`on_brokerage_message`): `LocateOddLot`, `LocatePurchased`, `LocateDeclined`, `LocateRefused` (broker text per refused offer), `LocateHandlerError`, `LocateUnused`, `LocateSoldBack`.
+
+Managing located shares (reads always ask TradeZero; actions block for up to `tradezero-locate-timeout-seconds`):
+
+```python
+free = TradeZeroLocates.get_available(self.htbx)                 # all types; 0 in backtests
+for inv in TradeZeroLocates.get_inventory(self.htbx):            # one row per type
+    self.debug(f"{inv.type}: available={inv.available} in use={inv.unavailable} selling={inv.to_be_sold} sold={inv.sold}")
+for r in TradeZeroLocates.sell_back_unused(self.htbx):           # whole lots of every type, e.g. at 15:50 ET
+    self.debug(f"{r.type} {r.status} {r.quantity} {r.message}")
+TradeZeroLocates.sell_back(self.htbx, 200, TradeZeroLocateType.PRE_BORROW)
+TradeZeroLocates.locate(self.htbx, 300, lambda q: q.offers[0])  # buy ahead, without an order
+TradeZeroLocates.get_history()                                   # today's quotes and sell-backs
+```
+
+Paper treats every symbol as easy to borrow and has no locate inventory: locates can only be exercised on live or on tz-mock (`short_htb` scenario).
 
 ## API exchange log
 
@@ -85,6 +131,8 @@ Headers are never logged, and every line is scrubbed for the key and secret valu
 | `tradezero-api-log-file`, `-max-mb`, `-bodies` | off, 50, true | |
 | `tradezero-poll-active-ms` / `-idle-ms` / `-account-ms` | 1000 / 5000 / 5000 | Within the documented rate limits |
 | `tradezero-reconcile-seconds` | 30 | Warns when positions differ from Lean's holdings |
+| `tradezero-locate-timeout-seconds` | 20 | Longest a locate waits for TradeZero (quote, then the fill of the accepted offer), not counting the handler |
+| `tradezero-locate-poll-ms` | 250 | How often the locate history is read while waiting |
 | `tradezero-account-type` | `margin` | or `cash` |
 | `tradezero-intraday-leverage` / `-overnight-leverage` | 4 / 2 | |
 | `tradezero-fee-per-order` / `-per-share` | 0 / 0 | The API reports no per-fill commissions |
@@ -110,7 +158,7 @@ docker compose -f .devcontainer/docker-compose.yml exec dev dotnet test QuantCon
 
 The tests:
 - **Unit:** mapping, settings, the paper/live guard, cash, the model, and the logger (secrets never written).
-- **`TzMock`:** fills, partial fills, cancel/replace, crossing zero, easy- and hard-to-borrow, expiry, rejections, restart recovery, Python access, and Lean's standard `BrokerageTests` suite.
+- **`TzMock`:** fills, partial fills, cancel/replace, crossing zero, easy- and hard-to-borrow, locates (handler, Reg SHO offers, sell-backs, refusals, timeouts), expiry, rejections, restart recovery, Python access, and Lean's standard `BrokerageTests` suite.
 - **`Paper`:** explicit, against the real paper API, and protected by the guard. `ReadsPaperAccount` is read-only. `PlacesAndCancelsFarLimitOrder` also needs `TZ_PAPER_ALLOW_ORDERS=1`. Run them with:
 
 ```bash
@@ -163,4 +211,4 @@ python3 tradezero_live.py --data-feed polygon --algorithm ./MyAlgorithm --worksp
 
 ## Not supported (yet)
 
-Locates and hard-to-borrow shorts, options, WebSocket streams, trailing stops, MarketOnClose, GoodTilDate, fractional shares, and selecting this brokerage from lean-cli (`lean live` would need a lean-cli PR).
+Automatic sell-back of locates at the close, options, WebSocket streams, trailing stops, MarketOnClose, GoodTilDate, fractional shares, and selecting this brokerage from lean-cli (`lean live` would need a lean-cli PR).

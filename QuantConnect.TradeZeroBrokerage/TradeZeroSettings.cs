@@ -55,6 +55,8 @@ namespace QuantConnect.Brokerages.TradeZero
         public const string AccountTypeKey = "tradezero-account-type";
         public const string IntradayLeverageKey = "tradezero-intraday-leverage";
         public const string OvernightLeverageKey = "tradezero-overnight-leverage";
+        public const string LocateTimeoutSecondsKey = "tradezero-locate-timeout-seconds";
+        public const string LocatePollMsKey = "tradezero-locate-poll-ms";
 
         /// <summary>Environment variables used when the key id / secret are not configured</summary>
         public const string ApiKeyIdEnvironmentVariable = "TZ_API_KEY_ID";
@@ -66,7 +68,8 @@ namespace QuantConnect.Brokerages.TradeZero
             ApiUrlKey, ApiKeyIdKey, ApiSecretKeyKey, AccountIdKey, EnvironmentKey, RouteKey,
             ApiLogFileKey, ApiLogMaxMbKey, ApiLogBodiesKey,
             ActivePollMsKey, IdlePollMsKey, AccountPollMsKey, ReconcileSecondsKey,
-            FeePerOrderKey, FeePerShareKey, AccountTypeKey, IntradayLeverageKey, OvernightLeverageKey
+            FeePerOrderKey, FeePerShareKey, AccountTypeKey, IntradayLeverageKey, OvernightLeverageKey,
+            LocateTimeoutSecondsKey, LocatePollMsKey
         };
 
         public string ApiUrl { get; set; } = TradeZeroRestClient.DefaultBaseUrl;
@@ -93,6 +96,13 @@ namespace QuantConnect.Brokerages.TradeZero
         public TimeSpan ReconcileInterval { get; set; } = TimeSpan.FromSeconds(30);
         /// <summary>How long an update waits for the cancel of the order it replaces</summary>
         public TimeSpan ReplaceCancelTimeout { get; set; } = TimeSpan.FromSeconds(5);
+        /// <summary>
+        /// Longest a locate workflow waits for TradeZero (quote answer, then the fill of the accepted offer), not counting the
+        /// time spent in the locate handler. Also bounds sell-backs.
+        /// </summary>
+        public TimeSpan LocateTimeout { get; set; } = TimeSpan.FromSeconds(20);
+        /// <summary>How often the locate history is read while a locate workflow waits</summary>
+        public TimeSpan LocatePollInterval { get; set; } = TimeSpan.FromMilliseconds(250);
 
         public decimal FeePerOrder { get; set; }
         public decimal FeePerShare { get; set; }
@@ -125,6 +135,8 @@ namespace QuantConnect.Brokerages.TradeZero
             settings.IdlePollInterval = TimeSpan.FromMilliseconds(Math.Max(500, ParseInt(Get(IdlePollMsKey), 5000, IdlePollMsKey)));
             settings.AccountPollInterval = TimeSpan.FromMilliseconds(Math.Max(1000, ParseInt(Get(AccountPollMsKey), 5000, AccountPollMsKey)));
             settings.ReconcileInterval = TimeSpan.FromSeconds(Math.Max(5, ParseInt(Get(ReconcileSecondsKey), 30, ReconcileSecondsKey)));
+            settings.LocateTimeout = TimeSpan.FromSeconds(Math.Max(1, ParseInt(Get(LocateTimeoutSecondsKey), 20, LocateTimeoutSecondsKey)));
+            settings.LocatePollInterval = TimeSpan.FromMilliseconds(Math.Max(100, ParseInt(Get(LocatePollMsKey), 250, LocatePollMsKey)));
             settings.FeePerOrder = ParseDecimal(Get(FeePerOrderKey), 0m, FeePerOrderKey);
             settings.FeePerShare = ParseDecimal(Get(FeePerShareKey), 0m, FeePerShareKey);
             settings.IntradayLeverage = ParseAccountType(Get(AccountTypeKey)) == AccountType.Cash

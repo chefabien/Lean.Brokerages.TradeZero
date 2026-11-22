@@ -39,6 +39,9 @@
   "tradezero-poll-idle-ms": 5000,
   "tradezero-poll-account-ms": 5000,
   "tradezero-reconcile-seconds": 30,
+  // Locates (hard-to-borrow shorts): how long to wait for TradeZero, and how often to read the locate history.
+  "tradezero-locate-timeout-seconds": 20,
+  "tradezero-locate-poll-ms": 250,
   // Brokerage model: margin or cash, leverage (check the account's allowed leverage), commissions.
   "tradezero-account-type": "margin",
   "tradezero-intraday-leverage": 4,

@@ -15,62 +15,29 @@
 
 using System;
 using QuantConnect.Interfaces;
-using QuantConnect.Logging;
 
 namespace QuantConnect.Brokerages.TradeZero
 {
     /// <summary>
-    /// Shortable provider backed by TradeZero's easy-to-borrow check. Locates are not supported, so
-    /// a hard-to-borrow symbol is reported as not shortable (0) and Lean blocks short orders before they
-    /// are sent; easy-to-borrow symbols have no limit (null).
+    /// Shortable provider of the TradeZero model: no limit at the Lean level (null) for every symbol.
     /// </summary>
     /// <remarks>
-    /// While no TradeZero brokerage is connected (backtests, research) every symbol is reported as
-    /// shortable, like Lean's default provider. The connected brokerage caches answers per symbol and day.
+    /// Lean's shortable check only sees the symbol, not the order properties. A hard-to-borrow short may be possible through
+    /// a locate (<see cref="TradeZeroOrderProperties.LocateHandler"/>, or shares already located), so the brokerage decides
+    /// when the order arrives, with a clear message when it refuses. Consequence: <c>self.shortable("HTBX", -100)</c> is
+    /// True. For an exact check use <see cref="TradeZeroLocates.IsEasyToBorrow"/> and <see cref="TradeZeroLocates.GetAvailable"/>.
     /// </remarks>
     public class TradeZeroShortableProvider : IShortableProvider
     {
-        private static Func<string, bool?> _easyToBorrowResolver;
-
         /// <summary>
         /// Shared instance
         /// </summary>
         public static TradeZeroShortableProvider Instance { get; } = new();
 
-        /// <summary>
-        /// Set by the connected brokerage: ticker -> easy to borrow (null when unknown)
-        /// </summary>
-        internal static void SetResolver(Func<string, bool?> resolver) => _easyToBorrowResolver = resolver;
-
-        internal static void ClearResolver(Func<string, bool?> resolver)
-        {
-            if (_easyToBorrowResolver == resolver)
-            {
-                _easyToBorrowResolver = null;
-            }
-        }
-
         public decimal FeeRate(Symbol symbol, DateTime localTime) => 0m;
 
         public decimal RebateRate(Symbol symbol, DateTime localTime) => 0m;
 
-        public long? ShortableQuantity(Symbol symbol, DateTime localTime)
-        {
-            var resolver = _easyToBorrowResolver;
-            if (resolver == null || symbol.SecurityType != SecurityType.Equity)
-            {
-                return null;
-            }
-            try
-            {
-                return resolver(symbol.Value) == false ? 0 : null;
-            }
-            catch (Exception e)
-            {
-                // never block trading because the check failed; the brokerage re-checks before sending
-                Log.Error($"TradeZeroShortableProvider: easy-to-borrow check failed for {symbol}: {e.Message}");
-                return null;
-            }
-        }
+        public long? ShortableQuantity(Symbol symbol, DateTime localTime) => null;
     }
 }

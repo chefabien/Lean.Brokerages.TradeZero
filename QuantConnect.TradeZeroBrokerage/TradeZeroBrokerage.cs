@@ -32,7 +32,8 @@ namespace QuantConnect.Brokerages.TradeZero
     /// Order status, fills and account figures are polled.
     /// </summary>
     /// <remarks>
-    /// Scope: US stocks, long and short (easy to borrow only, no locates), whole shares.
+    /// Scope: US stocks, long and short (hard-to-borrow shorts through locates, see <see cref="TradeZeroOrderProperties.LocateHandler"/>
+    /// and <see cref="TradeZeroLocates"/>), whole shares.
     /// Safety: refuses to connect when the account type does not match <see cref="TradeZeroSettings.Environment"/>
     /// (paper by default).
     /// </remarks>
@@ -46,7 +47,6 @@ namespace QuantConnect.Brokerages.TradeZero
         private readonly TradeZeroFeeModel _feeModel;
         private readonly TradeZeroApiLogger _apiLogger;
         private readonly TradeZeroRestClient _client;
-        private readonly Func<string, bool?> _easyToBorrowResolver;
         private readonly ConcurrentDictionary<string, (DateTime Day, bool EasyToBorrow)> _easyToBorrowCache = new();
         private readonly Dictionary<string, int> _positionMismatches = new();
         private readonly object _connectionLock = new();
@@ -114,8 +114,8 @@ namespace QuantConnect.Brokerages.TradeZero
                 : new TradeZeroApiLogger(settings.ApiLogFile, new[] { settings.ApiKeyId, settings.ApiSecretKey },
                     settings.ApiLogMaxMb * 1024L * 1024L, settings.ApiLogBodies);
             _client = new TradeZeroRestClient(settings.ApiUrl, settings.ApiKeyId, settings.ApiSecretKey, _apiLogger, transport: httpTransport);
-            _easyToBorrowResolver = ResolveEasyToBorrow;
             _runTag = DateTime.UtcNow.ToString("MMddHHmmss", System.Globalization.CultureInfo.InvariantCulture);
+            InitializeLocates();
 
             if (_apiLogger.Enabled)
             {
@@ -162,7 +162,7 @@ namespace QuantConnect.Brokerages.TradeZero
                         $"{TradeZeroSettings.IntradayLeverageKey} and {TradeZeroSettings.OvernightLeverageKey} to {pnl.AllowedLeverage}."));
                 }
                 TradeZeroAccount.Publish(_account);
-                TradeZeroShortableProvider.SetResolver(_easyToBorrowResolver);
+                TradeZeroLocates.Register(this);
 
                 _apiLogger.LogEvent("state", "connected", new { account = _accountId, accountType, route = _route });
                 Log.Trace($"TradeZeroBrokerage.Connect(): connected to {_client.BaseUrl} account {_accountId} ({accountType}), route: {_route ?? "<server default>"}");
@@ -196,7 +196,7 @@ namespace QuantConnect.Brokerages.TradeZero
                 _pollCancellation?.Dispose();
                 _pollCancellation = null;
                 _pollThread = null;
-                TradeZeroShortableProvider.ClearResolver(_easyToBorrowResolver);
+                TradeZeroLocates.Unregister(this);
                 TradeZeroAccount.Clear(_accountId);
                 _apiLogger.LogEvent("state", "disconnected", new { account = _accountId });
                 Log.Trace("TradeZeroBrokerage.Disconnect(): stopped polling");

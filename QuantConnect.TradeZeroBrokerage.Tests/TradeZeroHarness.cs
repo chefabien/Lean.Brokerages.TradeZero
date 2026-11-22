@@ -58,6 +58,8 @@ namespace QuantConnect.Brokerages.TradeZero.Tests
                 ActivePollInterval = TimeSpan.FromMilliseconds(300),
                 IdlePollInterval = TimeSpan.FromSeconds(1),
                 AccountPollInterval = TimeSpan.FromSeconds(1),
+                LocateTimeout = TimeSpan.FromSeconds(5),
+                LocatePollInterval = TimeSpan.FromMilliseconds(100),
             };
             Brokerage = new TradeZeroBrokerage(Settings, Orders, Securities);
             Brokerage.OrdersStatusChanged += OnOrderEvents;

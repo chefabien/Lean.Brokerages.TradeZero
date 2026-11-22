@@ -13,6 +13,8 @@
  * limitations under the License.
 */
 
+using System;
+using Newtonsoft.Json;
 using QuantConnect.Interfaces;
 using QuantConnect.Orders;
 
@@ -61,6 +63,30 @@ namespace QuantConnect.Brokerages.TradeZero
         /// Overrides <see cref="OrderProperties.TimeInForce"/> with a TradeZero-only value
         /// </summary>
         public TradeZeroTimeInForce? TimeInForceOverride { get; set; }
+
+        /// <summary>
+        /// Called when this order shorts a hard-to-borrow symbol and needs more located shares than the account holds, with
+        /// every offer TradeZero made for the quote (1 offer, or 2 for a Reg SHO threshold symbol: PreBorrow and SingleUse).
+        /// Return the offer to accept (its cost is charged right away and added to the first fill's fee), or null to decline
+        /// them all. Without a handler, a short that needs a new locate is refused (Invalid).
+        /// </summary>
+        /// <remarks>
+        /// Runs on a connector thread, not on the algorithm thread: keep it short and pure (read the offers, compare, return)
+        /// and never place orders from it. Offers expire 30 s after they are made. It must return one of the objects in
+        /// <c>quote.Offers</c> or null: an exception, or another object, counts as a decline. Called at most once per quote.
+        /// Not serialized: an order recovered after a restart has no handler (it was already placed).
+        /// <code>
+        /// props.locate_handler = lambda q: next((o for o in q.offers if o.price_per_share &lt;= 0.05), None)
+        /// </code>
+        /// </remarks>
+        [JsonIgnore]
+        public Func<TradeZeroLocateQuote, TradeZeroLocateOffer> LocateHandler { get; set; }
+
+        /// <summary>
+        /// Don't warn when a hard-to-borrow short is not a multiple of 100 shares (default false: warn). Locates are sold,
+        /// and sold back, in lots of 100, so the rest of the lot stays unused.
+        /// </summary>
+        public bool SuppressOddLotLocateWarning { get; set; }
 
         public override IOrderProperties Clone()
         {

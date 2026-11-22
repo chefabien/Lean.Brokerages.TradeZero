@@ -1,6 +1,8 @@
 # Design: locate support in the TradeZero connector
 
-Status: **proposal** (no code yet). Date: 2026-11-22.
+Status: **implemented** (tz-mock, then the connector; live checklist §9 still open). Date: 2026-11-22.
+
+What changed during the implementation: the settings are named `tradezero-locate-timeout-seconds` and `tradezero-locate-poll-ms`; `TradeZeroLocates.GetHistory()` returns `TradeZeroLocateRecord` rows; a 54 row **with** a `locateError` counts as a refusal (only 54 without an error, and 81, are "still working"); a handler that throws or returns a foreign object also emits `LocateHandlerError`; the zero-crossing opening leg is checked against the inventory and ends `Canceled` "short part was not placed" when it falls short.
 
 ## 1. Where we are today
 
@@ -332,7 +334,7 @@ A quote needs several round trips: POST quote, poll the history until 65, the ha
    - **the quote is complete** when every row seen has left 81 (Quoting) and 54 (Pending), **and** one more poll has gone by after the first row settled, so a `.SU` sibling that appears a little later is not missed. Whether both rows appear together is to be checked on live (§9). The settle poll costs about 250 ms;
    - at least one row at 65 → build `TradeZeroLocateQuote` → invoke the handler → `POST accept` with the chosen offer's `quoteReqID` → poll until that row is 50 → re-read the inventory;
    - accept always answers `locateAcceptSent`, even for an unknown id, so the history row is the only proof. Re-sending an accept is documented as safe, which allows one retry after an HTTP error;
-   - deadline: the new setting `tradezero-locate-timeout` (default 20 s) for the whole workflow, not counting the time spent in the handler.
+   - deadline: the new setting `tradezero-locate-timeout-seconds` (default 20 s) for the whole workflow, not counting the time spent in the handler.
 3. Then it takes `_orderLock` and, unless the order was canceled meanwhile, calls `SubmitLeg` for the first leg exactly as `PlaceOrder` does today. A failure ends the order `Invalid`, through `EmitEvent`, which runs after `Submitted`.
 
 While the order is `AwaitingLocate`:
@@ -391,7 +393,7 @@ public static class TradeZeroLocates
     public static IReadOnlyList<TradeZeroLocateRecord> GetHistory();                    // today's quotes / accepts / sell-backs (incl. ".SU" rows)
     public static bool? IsEasyToBorrow(Symbol symbol);                                  // cached per ET day; null = unknown
 
-    // ---- act (blocking, bounded by tradezero-locate-timeout)
+    // ---- act (blocking, bounded by tradezero-locate-timeout-seconds)
     /// Sell located shares of one type back for credit. quantity: multiple of 100, at most GetAvailable(symbol, type).
     /// type may be omitted only when the symbol has a single inventory row; otherwise Rejected "several locate types held".
     public static TradeZeroLocateResult SellBack(Symbol symbol, long quantity, TradeZeroLocateType? type = null);
@@ -463,7 +465,7 @@ Behaviour:
 | `GetLocateInventory(account)` | `GET /accounts/{a}/locates/inventory` (accepts both `{"locateInventory":[…]}` and a bare list) |
 
 Models: `TzLocateHistoryRow`, `TzLocateInventoryRow`, and `TzLocateStatus` constants (48 New/sell-back queued, 50 Filled, 52 Canceled, 54 Pending, 56 Rejected, 65 Offered, 67 Expired, 81 Quoting). `locateType` maps 1 and 2 → `Locate`, 3 → `PreBorrow`, 4 → `SingleUse`, 0 → `Unknown`. The `preBorrow` boolean is ignored, as the guide recommends. A history row belongs to quote `q` when its id is `q` or `q.SU`.
-Settings: `tradezero-locate-timeout` (default 20 s) and `tradezero-locate-poll-interval` (default 250 ms).
+Settings: `tradezero-locate-timeout-seconds` (default 20) and `tradezero-locate-poll-ms` (default 250).
 Internals: a `TradeZeroLocateManager` class owns the workflow, the per-symbol semaphores and the quote id sequence. The brokerage and `TradeZeroLocates` both use it, which keeps `TradeZeroBrokerage.Orders.cs` readable.
 
 ## 7. tz-mock changes

@@ -145,6 +145,8 @@ namespace QuantConnect.Brokerages.TradeZero.Api
                 ["cancelAll"] = new RateGate(1, TimeSpan.FromMilliseconds(350)),
                 ["etb"] = new RateGate(2, TimeSpan.FromSeconds(1)),
                 ["routes"] = new RateGate(1, TimeSpan.FromSeconds(1)),
+                // not documented: room for a history poll every 250 ms plus the quote/accept calls
+                ["locates"] = new RateGate(5, TimeSpan.FromSeconds(1)),
             };
         }
 
@@ -239,6 +241,91 @@ namespace QuantConnect.Brokerages.TradeZero.Api
         public List<TzRoute> GetRoutes(string accountId)
         {
             return Parse<TzRoutesResponse>(SendOrThrow("routes", HttpMethod.Get, $"/accounts/{Esc(accountId)}/routes")).Routes;
+        }
+
+        /// <summary>
+        /// Asks for a locate quote. The answer comes as history rows (<see cref="GetLocateHistory"/>) with this id,
+        /// and id + ".SU" for the SingleUse offer of a Reg SHO symbol.
+        /// </summary>
+        /// <exception cref="TradeZeroApiException">400 (quantity below 100, reused id R114), or outcome unknown</exception>
+        public void RequestLocateQuote(string accountId, string symbol, long quantity, string quoteReqId)
+        {
+            PostJson("POST locate quote", "/accounts/locates/quote",
+                new TzLocateQuoteRequest { Account = accountId, Symbol = symbol, Quantity = quantity, QuoteReqId = quoteReqId });
+        }
+
+        /// <summary>
+        /// Accepts an offered row (base id or id + ".SU"). TradeZero always acknowledges, even an unknown id:
+        /// the history row reaching 50 (Filled) is the only proof. Re-sending is documented as safe.
+        /// </summary>
+        public void AcceptLocate(string accountId, string quoteReqId)
+        {
+            PostJson("POST locate accept", "/accounts/locates/accept",
+                new TzLocateAcceptRequest { AccountId = accountId, QuoteReqId = quoteReqId });
+        }
+
+        /// <summary>
+        /// Cancels an offered row, or a queued sell-back
+        /// </summary>
+        public void CancelLocate(string accountId, string quoteReqId)
+        {
+            var (status, body) = Send("locates", HttpMethod.Delete, $"/accounts/locates/cancel/accounts/{Esc(accountId)}/quoteReqID/{Esc(quoteReqId)}");
+            EnsureSuccess(status, body, "DELETE locate");
+        }
+
+        /// <summary>
+        /// Sells located shares of one type back for credit. The result comes as a history row with this id.
+        /// </summary>
+        /// <param name="locateType">"Locate", "PreBorrow" or "SingleUse"</param>
+        public void SellLocate(string accountId, string symbol, long quantity, string locateType, string quoteReqId)
+        {
+            PostJson("POST locate sell", "/accounts/locates/sell",
+                new TzLocateSellRequest { Account = accountId, Symbol = symbol, Quantity = quantity, LocateType = locateType, QuoteReqId = quoteReqId });
+        }
+
+        /// <summary>
+        /// Today's locate quotes, accepts and sell-backs
+        /// </summary>
+        public List<TzLocateHistoryRow> GetLocateHistory(string accountId)
+        {
+            var body = SendOrThrow("locates", HttpMethod.Get, $"/accounts/{Esc(accountId)}/locates/history");
+            return ParseList<TzLocateHistoryRow>(body, "locateHistory");
+        }
+
+        /// <summary>
+        /// Located shares per (symbol, locateType)
+        /// </summary>
+        public List<TzLocateInventoryRow> GetLocateInventory(string accountId)
+        {
+            var body = SendOrThrow("locates", HttpMethod.Get, $"/accounts/{Esc(accountId)}/locates/inventory");
+            return ParseList<TzLocateInventoryRow>(body, "locateInventory");
+        }
+
+        private void PostJson(string what, string path, object payload)
+        {
+            var json = JsonConvert.SerializeObject(payload);
+            var (status, body) = Send("locates", HttpMethod.Post, path, () => new StringContent(json, Encoding.UTF8, "application/json"));
+            EnsureSuccess(status, body, what);
+        }
+
+        /// <summary>
+        /// Accepts both <c>{"key": [...]}</c> and a bare list
+        /// </summary>
+        private static List<T> ParseList<T>(string body, string key)
+        {
+            try
+            {
+                var token = Newtonsoft.Json.Linq.JToken.Parse(string.IsNullOrWhiteSpace(body) ? "[]" : body);
+                if (token is Newtonsoft.Json.Linq.JObject obj)
+                {
+                    token = obj[key] ?? new Newtonsoft.Json.Linq.JArray();
+                }
+                return token.Type == Newtonsoft.Json.Linq.JTokenType.Null ? new List<T>() : token.ToObject<List<T>>() ?? new List<T>();
+            }
+            catch (JsonException e)
+            {
+                throw new TradeZeroApiException($"Unexpected response for {key}: {e.Message}", HttpStatusCode.OK, body, false, e);
+            }
         }
 
         public void Dispose()

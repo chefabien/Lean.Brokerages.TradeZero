@@ -17,6 +17,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
+using System.Threading.Tasks;
 using QuantConnect.Brokerages.TradeZero.Api;
 using QuantConnect.Logging;
 using QuantConnect.Orders;
@@ -61,6 +62,11 @@ namespace QuantConnect.Brokerages.TradeZero
             public bool Done;
             public bool FirstFillCharged;
             public int NextSequence = 1;
+            /// <summary>Waiting for the locate workflow: nothing has been sent to the broker yet</summary>
+            public bool AwaitingLocate;
+            public CancellationTokenSource LocateCancel;
+            /// <summary>Cost of the locate bought for this order, added to the first fill's fee</summary>
+            public decimal LocateCost;
             public Leg Current => Legs.Count == 0 ? null : Legs[^1];
             public List<string> BrokerIds => Legs.Select(l => l.ClientOrderId).ToList();
         }
@@ -134,16 +140,11 @@ namespace QuantConnect.Brokerages.TradeZero
 
             lock (_orderLock)
             {
+                SemaphoreSlim locateGate = null;
                 try
                 {
                     var holdings = _securityProvider.GetHoldingsQuantity(order.Symbol);
                     var legs = TradeZeroOrderMapper.PlanLegs(holdings, order.Quantity);
-                    if (legs.Any(l => l.Side == TzValues.Sell && l.OpenClose == TzValues.Open) && ResolveEasyToBorrow(ticker) == false)
-                    {
-                        EmitInvalid(order, $"{ticker} is hard to borrow: short selling it needs a locate, which this brokerage does not support.");
-                        return false;
-                    }
-
                     var tracked = new TrackedOrder
                     {
                         LeanOrderId = order.Id,
@@ -155,6 +156,44 @@ namespace QuantConnect.Brokerages.TradeZero
                         PendingLeg = legs.Count > 1 ? legs[1] : null
                     };
                     _apiLogger.LogEvent("lean", "place", new { leanOrderId = order.Id, symbol = ticker, quantity = order.Quantity, type = order.Type.ToString(), holdings, legs });
+
+                    var shortLeg = legs.FirstOrDefault(IsShortLeg);
+                    if (shortLeg != null && ResolveEasyToBorrow(ticker) == false)
+                    {
+                        var properties = order.Properties as TradeZeroOrderProperties;
+                        var handler = properties?.LocateHandler;
+                        if (shortLeg.Quantity % 100 != 0 && properties?.SuppressOddLotLocateWarning != true)
+                        {
+                            Warn("LocateOddLot", $"{ticker}: short of {shortLeg.Quantity} shares is not a multiple of 100. Locates are sold, and can only " +
+                                $"be sold back, in lots of 100, so {RoundUpToLotRemainder(shortLeg.Quantity)} located shares will stay unused. " +
+                                "Set SuppressOddLotLocateWarning to hide this.");
+                        }
+
+                        // the inventory can be checked right away unless another locate action holds the symbol
+                        locateGate = _locates.SymbolLock(ticker);
+                        if (!locateGate.Wait(0))
+                        {
+                            locateGate = null;
+                            return StartLocateWorkflow(tracked, legs, shortLeg.Quantity, handler);
+                        }
+                        var available = TryReadAvailable(ticker);
+                        if (available == null || available >= shortLeg.Quantity)
+                        {
+                            // covered by the inventory (or unknown: TradeZero decides): submit as usual, holding the lock
+                            // until the broker has reserved the shares
+                        }
+                        else if (handler == null)
+                        {
+                            EmitInvalid(order, NoLocateHandlerMessage(ticker, shortLeg.Quantity, available.Value));
+                            return false;
+                        }
+                        else
+                        {
+                            locateGate.Release();
+                            locateGate = null;
+                            return StartLocateWorkflow(tracked, legs, shortLeg.Quantity, handler);
+                        }
+                    }
 
                     var result = SubmitLeg(tracked, legs[0]);
                     if (!result.Placed)
@@ -182,6 +221,10 @@ namespace QuantConnect.Brokerages.TradeZero
                     EmitInvalid(order, $"TradeZero order failed: {e.Message}");
                     return false;
                 }
+                finally
+                {
+                    locateGate?.Release();
+                }
             }
         }
 
@@ -204,6 +247,10 @@ namespace QuantConnect.Brokerages.TradeZero
                     {
                         refusal = "the order is not working at TradeZero anymore";
                     }
+                    else if (tracked.AwaitingLocate)
+                    {
+                        refusal = "waiting for a locate";
+                    }
                     else if (order.AbsoluteQuantity <= tracked.FilledQuantity)
                     {
                         refusal = $"new quantity {order.AbsoluteQuantity} is not above the filled quantity {tracked.FilledQuantity}";
@@ -211,6 +258,10 @@ namespace QuantConnect.Brokerages.TradeZero
                     else if (tracked.Current.Terminal)
                     {
                         refusal = "the TradeZero order is already final (a zero-crossing order between its two parts)";
+                    }
+                    else
+                    {
+                        refusal = CheckUpdateLocate(tracked, order);
                     }
                     if (refusal != null)
                     {
@@ -254,9 +305,12 @@ namespace QuantConnect.Brokerages.TradeZero
                     _apiLogger.LogEvent("lean", "update: replace", new { leanOrderId = order.Id, holdings, remaining, legs });
 
                     SubmitResult result;
-                    if (legs[0].Side == TzValues.Sell && legs[0].OpenClose == TzValues.Open && ResolveEasyToBorrow(tracked.Ticker) == false)
+                    long? located = null;
+                    if (IsShortLeg(legs[0]) && ResolveEasyToBorrow(tracked.Ticker) == false &&
+                        (located = TryReadAvailable(tracked.Ticker)) < legs[0].Quantity)
                     {
-                        result = new SubmitResult(false, null, null, $"{tracked.Ticker} is hard to borrow (locates not supported)");
+                        result = new SubmitResult(false, null, null,
+                            $"{tracked.Ticker} is hard to borrow and only {located} located shares are available for {legs[0].Quantity} short shares");
                     }
                     else
                     {
@@ -301,6 +355,15 @@ namespace QuantConnect.Brokerages.TradeZero
                         return false;
                     }
                     tracked.PendingLeg = null;
+                    if (tracked.AwaitingLocate)
+                    {
+                        // nothing sent yet: the locate workflow stops (open offers are canceled; a locate already bought stays)
+                        tracked.Done = true;
+                        tracked.LocateCancel?.Cancel();
+                        _apiLogger.LogEvent("lean", "cancel while awaiting locate", new { leanOrderId = order.Id });
+                        EmitEvent(tracked, OrderStatus.Canceled, null, "Canceled while waiting for a locate");
+                        return true;
+                    }
                     var leg = tracked.Current;
                     if (leg.Terminal)
                     {
@@ -493,10 +556,12 @@ namespace QuantConnect.Brokerages.TradeZero
             tracked.PendingLeg = null;
             _apiLogger.LogEvent("lean", "cross zero: place opening leg", new { leanOrderId = tracked.LeanOrderId, plan });
 
-            if (plan.Side == TzValues.Sell && ResolveEasyToBorrow(tracked.Ticker) == false)
+            long? located = null;
+            if (IsShortLeg(plan) && ResolveEasyToBorrow(tracked.Ticker) == false && (located = TryReadAvailable(tracked.Ticker)) < plan.Quantity)
             {
                 tracked.Done = true;
-                EmitEvent(tracked, OrderStatus.Canceled, null, $"Position closed, but {tracked.Ticker} is hard to borrow: the short part was not placed (locates not supported).");
+                EmitEvent(tracked, OrderStatus.Canceled, null, $"Position closed, but {tracked.Ticker} is hard to borrow and only {located} located shares " +
+                    $"are available for the {plan.Quantity} short shares: the short part was not placed.");
                 return;
             }
             var result = SubmitLeg(tracked, plan);
@@ -524,6 +589,11 @@ namespace QuantConnect.Brokerages.TradeZero
                 tracked.Done = true;
             }
             var fee = _feeModel.GetFillFee(quantity, !tracked.FirstFillCharged);
+            if (!tracked.FirstFillCharged && tracked.LocateCost > 0)
+            {
+                // the locate bought for this order is a cost of its first fill (TradeZero charged it at the accept)
+                fee = new OrderFee(new Securities.CashAmount(fee.Value.Amount + tracked.LocateCost, Currencies.USD));
+            }
             tracked.FirstFillCharged = true;
             _apiLogger.LogEvent("lean", "fill", new { leanOrderId = tracked.LeanOrderId, clientOrderId = leg.ClientOrderId, quantity = tracked.Sign * quantity, price, filled = tracked.FilledQuantity, total = tracked.TotalQuantity, status = status.ToString() });
             EmitEvent(tracked, status, fee, $"TradeZero fill ({leg.ClientOrderId})", tracked.Sign * quantity, price);
@@ -570,6 +640,30 @@ namespace QuantConnect.Brokerages.TradeZero
         {
             // unique across restarts (run tag) because TradeZero rejects any reused id (R114), even after a cancel
             return $"LN{_runTag}.{tracked.LeanOrderId}.{tracked.NextSequence++}";
+        }
+
+        private static bool IsShortLeg(TradeZeroLegPlan plan) => plan.Side == TzValues.Sell && plan.OpenClose == TzValues.Open;
+
+        private static long RoundUpToLotRemainder(long shares) => TradeZeroLocateManager.RoundUpToLot(shares) - shares;
+
+        private static string NoLocateHandlerMessage(string ticker, long shortQuantity, long available)
+        {
+            return $"{ticker} is hard to borrow: shorting {shortQuantity} needs {shortQuantity - available} more located shares ({available} held). " +
+                "Set TradeZeroOrderProperties.LocateHandler to buy a locate.";
+        }
+
+        /// <summary>Located shares of the symbol available now (all types), null when the inventory cannot be read</summary>
+        private long? TryReadAvailable(string ticker)
+        {
+            try
+            {
+                return _locates.Available(ticker);
+            }
+            catch (Exception e)
+            {
+                Log.Error($"TradeZeroBrokerage: reading the locate inventory for {ticker} failed: {e.Message}");
+                return null;
+            }
         }
 
         private bool HasWorkingOrders()

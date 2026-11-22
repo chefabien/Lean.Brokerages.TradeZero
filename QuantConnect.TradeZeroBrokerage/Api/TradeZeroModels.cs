@@ -242,4 +242,122 @@ namespace QuantConnect.Brokerages.TradeZero.Api
     {
         [JsonProperty("isEasyToBorrow")] public bool IsEasyToBorrow { get; set; }
     }
+
+    /// <summary>
+    /// <c>locateStatus</c> codes of the locate history (Short Locates guide)
+    /// </summary>
+    public static class TzLocateStatus
+    {
+        /// <summary>Sell-back queued</summary>
+        public const int New = 48;
+        /// <summary>Accepted locate, or settled sell-back</summary>
+        public const int Filled = 50;
+        public const int Canceled = 52;
+        /// <summary>Pending, or (with a locateError) refused for this pool: "11 No shares available"</summary>
+        public const int Pending = 54;
+        public const int Rejected = 56;
+        /// <summary>Offer to accept within 30 s</summary>
+        public const int Offered = 65;
+        public const int Expired = 67;
+        public const int Quoting = 81;
+    }
+
+    /// <summary>
+    /// <c>locateType</c> codes: 0 unknown (refused rows), 1 and 2 ordinary locate (two pools), 3 PreBorrow, 4 SingleUse
+    /// </summary>
+    public static class TzLocateType
+    {
+        /// <summary>The <c>/sell</c> string for a locate type</summary>
+        public static string SellName(TradeZeroLocateType type) => type switch
+        {
+            TradeZeroLocateType.Locate => "Locate",
+            TradeZeroLocateType.PreBorrow => "PreBorrow",
+            TradeZeroLocateType.SingleUse => "SingleUse",
+            _ => "Unknown"
+        };
+
+        /// <summary>Maps a <c>locateType</c> code; the <c>preBorrow</c> boolean is ignored, as the guide recommends</summary>
+        public static TradeZeroLocateType FromCode(int code) => code switch
+        {
+            1 or 2 => TradeZeroLocateType.Locate,
+            3 => TradeZeroLocateType.PreBorrow,
+            4 => TradeZeroLocateType.SingleUse,
+            _ => TradeZeroLocateType.Unknown
+        };
+    }
+
+    /// <summary>
+    /// A row of GET /accounts/{a}/locates/history: a quote (one row, or two for a Reg SHO symbol: id and id + ".SU"),
+    /// or a sell-back (negative <see cref="LocateShares"/>)
+    /// </summary>
+    public class TzLocateHistoryRow
+    {
+        [JsonProperty("accountId")] public string AccountId { get; set; }
+        [JsonProperty("quoteReqID")] public string QuoteReqId { get; set; }
+        [JsonProperty("symbol")] public string Symbol { get; set; }
+        [JsonProperty("locateStatus")] public int LocateStatus { get; set; }
+        [JsonProperty("locateType")] public int LocateType { get; set; }
+        [JsonProperty("locateShares")] public long LocateShares { get; set; }
+        [JsonProperty("filledShares")] public long FilledShares { get; set; }
+        [JsonProperty("locatePrice")] public decimal LocatePrice { get; set; }
+        [JsonProperty("locateError")] public int LocateError { get; set; }
+        [JsonProperty("text")] public string Text { get; set; }
+        [JsonProperty("createdDate")] public DateTime? CreatedDate { get; set; }
+        [JsonProperty("updatedDate")] public DateTime? UpdatedDate { get; set; }
+
+        /// <summary>
+        /// False while TradeZero is still working on the row: 81 (Quoting), or 54 (Pending) without an error.
+        /// A 54 row with an error code is a refusal for that pool ("11 No shares available").
+        /// </summary>
+        [JsonIgnore]
+        public bool IsSettled => LocateStatus != TzLocateStatus.Quoting &&
+            !(LocateStatus == TzLocateStatus.Pending && LocateError == 0 && string.IsNullOrEmpty(Text));
+
+        public override string ToString()
+        {
+            return $"{QuoteReqId} {Symbol} status={LocateStatus} type={LocateType} shares={LocateShares} filled={FilledShares} price={LocatePrice} error={LocateError} text={Text}";
+        }
+    }
+
+    public class TzLocateHistoryResponse
+    {
+        [JsonProperty("locateHistory")] public List<TzLocateHistoryRow> LocateHistory { get; set; } = new();
+    }
+
+    /// <summary>
+    /// A row of GET /accounts/{a}/locates/inventory: one per (symbol, locateType)
+    /// </summary>
+    public class TzLocateInventoryRow
+    {
+        [JsonProperty("accountId")] public string AccountId { get; set; }
+        [JsonProperty("symbol")] public string Symbol { get; set; }
+        [JsonProperty("locateType")] public int LocateType { get; set; }
+        [JsonProperty("available")] public long Available { get; set; }
+        [JsonProperty("unavailable")] public long Unavailable { get; set; }
+        [JsonProperty("toBeSold")] public long ToBeSold { get; set; }
+        [JsonProperty("sold")] public long Sold { get; set; }
+    }
+
+    public class TzLocateQuoteRequest
+    {
+        [JsonProperty("account")] public string Account { get; set; }
+        [JsonProperty("symbol")] public string Symbol { get; set; }
+        [JsonProperty("quantity")] public long Quantity { get; set; }
+        [JsonProperty("quoteReqID")] public string QuoteReqId { get; set; }
+    }
+
+    public class TzLocateAcceptRequest
+    {
+        [JsonProperty("accountId")] public string AccountId { get; set; }
+        [JsonProperty("quoteReqID")] public string QuoteReqId { get; set; }
+    }
+
+    public class TzLocateSellRequest
+    {
+        [JsonProperty("account")] public string Account { get; set; }
+        [JsonProperty("symbol")] public string Symbol { get; set; }
+        [JsonProperty("quantity")] public long Quantity { get; set; }
+        [JsonProperty("locateType")] public string LocateType { get; set; }
+        [JsonProperty("quoteReqID")] public string QuoteReqId { get; set; }
+    }
 }

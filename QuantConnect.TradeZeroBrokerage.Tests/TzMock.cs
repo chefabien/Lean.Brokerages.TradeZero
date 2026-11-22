@@ -96,6 +96,30 @@ namespace QuantConnect.Brokerages.TradeZero.Tests
             return State(key)["prices"]![ticker]!.Value<decimal>();
         }
 
+        /// <summary>The session's locate state: inventory, openQuotes, inUse, supply, locateCosts, locateCredits...</summary>
+        public static JObject Locates(string key)
+        {
+            return (JObject)State(key)["locates"];
+        }
+
+        /// <summary>Sets one inventory row's available shares (no quote, no cost)</summary>
+        public static JObject SetInventory(string key, string symbol, int available, string locateType = "Locate")
+        {
+            return Send(key, HttpMethod.Post, "/mock/locates/inventory", JsonConvert.SerializeObject(new { symbol, available, locateType }));
+        }
+
+        /// <summary>The next quote(s) for the symbol are refused with this row</summary>
+        public static JObject NextLocateError(string key, string symbol, int code, string text, int status = 56, int count = 1)
+        {
+            return Send(key, HttpMethod.Post, "/mock/locates/next-error", JsonConvert.SerializeObject(new { symbol, code, text, status, count }));
+        }
+
+        /// <summary>Fails the next matching /v1/api request(s); when "after", the request is processed and only the response is lost</summary>
+        public static JObject AddFault(string key, string method, string path, int status = 500, int count = 1, string when = "before")
+        {
+            return Send(key, HttpMethod.Post, "/mock/faults", JsonConvert.SerializeObject(new { method, path, status, count, when }));
+        }
+
         private static JObject Send(string key, HttpMethod method, string path, string body)
         {
             using var request = new HttpRequestMessage(method, Url + path);
