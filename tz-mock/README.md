@@ -32,7 +32,10 @@ All control endpoints except `GET /mock/scenarios` need the `TZ-API-KEY-ID` head
 | `GET /mock/scenarios` | | Lists `[{name, description}]` |
 | `POST /mock/scenario` | `{"name": "basic_fills", "params": {"cash": 50000}}` | Restarts the session on that scenario. The portfolio, orders and locates are zeroed, and the clock goes to the scenario start. `params` override scenario attributes. |
 | `POST /mock/time` | `{"to": "2026-01-05T15:00:00Z"}` | Moves the clock forward. The time must be later than now. Bars in `(now, to]` are replayed against working orders. Returns `{now, fills}`. |
-| `GET /mock/state` | | Debug view: scenario, now, last prices, working orders |
+| `GET /mock/state` | | Debug view: scenario, now, last prices, working orders, locates (inventory, open quotes, shares in use by shorts, supply, costs and credits) |
+| `POST /mock/locates/inventory` | `{"symbol": "HTBX", "available": 200, "locateType": "Locate"}` | Sets one inventory row's `available` shares with no quote and no cost (`locateType`: `Locate`, `PreBorrow` or `SingleUse`). Use it to seed locates, or to simulate shares used elsewhere. |
+| `POST /mock/locates/next-error` | `{"symbol": "HTBX", "code": 14, "text": "14 Locate is already pending.", "status": 56, "count": 1}` | The next `count` quotes for the symbol are refused with this row |
+| `POST /mock/faults` | `{"method": "POST", "path": "*/locates/accept", "status": 500, "count": 1, "when": "before", "delayMs": 0, "body": ""}` | Fails the next matching `/v1/api` request(s). `when: "after"` processes the request and then loses the response. `GET` lists the faults, `DELETE` clears them. |
 | `DELETE /mock/session` | | Forgets the session |
 
 A session that never chose a scenario starts on `basic_fills`.
@@ -53,7 +56,26 @@ curl -s -H "$H" localhost:8000/v1/api/accounts/$ACC/positions
 |---|---|
 | `basic_fills` | AAPL and MSFT over two sessions (2026-01-05/06). Market, limit and stop fills, Day expiry at 16:00 ET, overnight positions. |
 | `partial_fills` | THIN, a low-volume symbol. Only 10% of each bar's volume can fill, so orders go `PartiallyFilled` across bars. |
-| `short_htb` | Shorting and locates with live behaviour. AAPL is easy to borrow. HTBX is hard to borrow and has locates at $0.03. NOLOC has no locate supply. SUBP is under $0.50 (R40). |
+| `short_htb` | Shorting and locates with live behaviour. AAPL is easy to borrow. HTBX is hard to borrow and has locates at $0.03. NOLOC has no locate supply. SUBP is under $0.50 (R40). REGSHO is on the Reg SHO threshold list: each quote offers PreBorrow at $0.03 (base id) and SingleUse at $0.01 (`<id>.SU`). |
+
+### Locate parameters
+
+Any scenario accepts these as `params`, e.g. `{"name": "short_htb", "params": {"locate_quote_polls": 2}}`:
+
+| Param | Default | Effect |
+|---|---|---|
+| `htb` | `[]` | Hard-to-borrow symbols |
+| `regsho` | `[]` | Reg SHO threshold symbols (hard to borrow; quotes give a PreBorrow and a SingleUse row) |
+| `locate_price` | `{}` | `{"HTBX": 0.03}` prices every type; `{"REGSHO": {"PreBorrow": 0.03, "SingleUse": 0.01}}` prices by type, and a missing type is refused (54/11). No entry: "No shares available" |
+| `locate_offer_seconds` | `30` | Virtual seconds before an offer expires |
+| `locate_quote_polls` | `0` | History reads a new quote row shows 81 (Quoting) before its outcome |
+| `locate_sibling_polls` | `0` | History reads before the `.SU` row of a Reg SHO quote appears |
+| `locate_supply` | `{}` | Shares that can still be located today per symbol (absent: unlimited) |
+| `locate_inventory` | `{}` | Inventory at the start: `{"HTBX": 200}` or `{"REGSHO": {"PreBorrow": 100, "SingleUse": 100}}` |
+| `locate_accept_ignored` | `[]` | Symbols whose accepts are acknowledged but never applied |
+| `locate_sellback_credit` | `1.0` | Fraction of the locate price credited on a sell-back |
+| `locate_pool_code` | `{}` | `locateType` of ordinary locates per symbol: 1 (default) or 2 |
+| `locate_use_order` | `[1, 2, 3, 4]` | Which inventory type a short uses first |
 
 ### Adding a scenario
 

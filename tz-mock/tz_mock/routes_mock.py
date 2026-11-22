@@ -9,6 +9,7 @@ from pydantic import BaseModel
 from . import scenarios
 from .marketdata import parse_dt
 from .models import ts
+from .sessions import Fault
 
 router = APIRouter(prefix="/mock", tags=["mock"])
 
@@ -71,6 +72,85 @@ async def state(request: Request):
     if isinstance(key, JSONResponse):
         return key
     return request.app.state.sessions.get(key).broker.state_json()
+
+
+class InventoryRequest(BaseModel):
+    symbol: str
+    available: int
+    locateType: str = "Locate"  # Locate | PreBorrow | SingleUse
+
+
+class LocateErrorRequest(BaseModel):
+    symbol: str
+    code: int  # locateError
+    text: str
+    status: int = 56  # locateStatus of the refused row
+    count: int = 1  # how many of the next quotes for the symbol get it
+
+
+class FaultRequest(BaseModel):
+    method: str
+    path: str
+    status: int = 500
+    count: int = 1
+    when: str = "before"
+    delayMs: int = 0
+    body: str = ""
+
+
+@router.post("/locates/inventory")
+async def set_inventory(request: Request, req: InventoryRequest):
+    """Set one inventory row's `available` shares without a quote (seed, or simulate another consumer)."""
+    key = _key(request)
+    if isinstance(key, JSONResponse):
+        return key
+    b = request.app.state.sessions.get(key).broker
+    try:
+        inv = b.set_inventory(req.symbol, req.locateType, req.available)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, 400)
+    return inv.to_json()
+
+
+@router.post("/locates/next-error")
+async def next_locate_error(request: Request, req: LocateErrorRequest):
+    """Make the next quote(s) for a symbol be refused with this row (locateType 0)."""
+    key = _key(request)
+    if isinstance(key, JSONResponse):
+        return key
+    b = request.app.state.sessions.get(key).broker
+    b.next_locate_errors.setdefault(req.symbol, []).extend([(req.status, req.code, req.text)] * req.count)
+    return {"symbol": req.symbol, "queued": len(b.next_locate_errors[req.symbol])}
+
+
+@router.post("/faults")
+async def add_fault(request: Request, req: FaultRequest):
+    """Fail the next matching /v1/api request(s) of this session with a bare HTTP status."""
+    key = _key(request)
+    if isinstance(key, JSONResponse):
+        return key
+    if req.when not in ("before", "after"):
+        return JSONResponse({"error": "when must be 'before' or 'after'"}, 400)
+    session = request.app.state.sessions.get(key)
+    session.faults.append(Fault(req.method, req.path, req.status, req.count, req.when, req.delayMs, req.body))
+    return {"faults": [f.to_json() for f in session.faults]}
+
+
+@router.get("/faults")
+async def list_faults(request: Request):
+    key = _key(request)
+    if isinstance(key, JSONResponse):
+        return key
+    return {"faults": [f.to_json() for f in request.app.state.sessions.get(key).faults]}
+
+
+@router.delete("/faults")
+async def clear_faults(request: Request):
+    key = _key(request)
+    if isinstance(key, JSONResponse):
+        return key
+    request.app.state.sessions.get(key).faults.clear()
+    return {"faults": []}
 
 
 @router.delete("/session")

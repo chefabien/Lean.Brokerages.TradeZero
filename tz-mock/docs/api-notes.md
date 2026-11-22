@@ -115,32 +115,45 @@ Rejections marked "sync" come back in the POST response. The others return `Pend
 
 ## Locates and short selling: live is the reference
 Paper treats every symbol as easy to borrow and produces no locate inventory (api-keys page, "Get keys for a paper account"). For this area the mock follows the **live** workflow from the Short Locates guide [docs]:
-- **ETB check:** `GET /is-easy-to-borrow/symbol/{sym}` returns `{"isEasyToBorrow": bool}`, set by `scenario.htb`. The value does not flip after a locate.
+- **ETB check:** `GET /is-easy-to-borrow/symbol/{sym}` returns `{"isEasyToBorrow": bool}`. It is false for symbols in `scenario.htb` or `scenario.regsho`. The value does not flip after a locate.
 - **Quote:** `POST /accounts/locates/quote` takes `{account, symbol, quantity, quoteReqID}` and returns `{"locateQuoteSent":"true"}`.
   - A quantity below 100 or above 2147483647 returns a ProblemDetails 400.
-  - A reused `quoteReqID` returns 400 text `R114: Invalid duplicate UserOrderId`. The exact shape is unverified.
-- **Quote outcome**, as the history row (`locateStatus`, `locateError`, `text`):
-  - Scenario has a locate price for the symbol: 65 Offered, `locatePrice` > 0, `text:""`.
-  - ETB symbol: 56, `locateError:56`, `R56: This symbol is Easy to Borrow.`
-  - No inventory: 56, `locateError:11`, `11 No shares available. Please try again later.`
-  - An open (Offered) quote already exists for the symbol: 56, `locateError:14`, `14 Locate is already pending.`
-  - Current price below $0.50: 56, `locateError:40`, `R40: Shorting stocks under $0.500000 is not allowed`.
-  - [mock] The quote moves straight to 65, without the brief 81 Quoting state.
-- **Expiry:** an offer expires 30 virtual seconds after it reaches 65, moving to 67 with `Quote expired.`
-- **Accept:** `POST /accounts/locates/accept` takes `{accountId, quoteReqID}` and returns `{"locateAcceptSent":"true"}`. The row moves to 50 with `filledShares` set, inventory `available` grows, and `totalLocateCosts` rises by `locatePrice × qty`, which is also deducted from cash.
-- **Cancel:** `DELETE /accounts/locates/cancel/accounts/{acc}/quoteReqID/{q}` returns `{"locateCancelSent":"true"}`. On an Offered row it moves to 52 with `Quote canceled.` Otherwise there is no change.
-- **Sell-back:** `POST /accounts/locates/sell` takes `{account, symbol, quantity, locateType, quoteReqID}` and returns `{"locateSellbackSent":"true"}`.
-  - It adds a history row with status 48 and negative `locateShares`.
-  - Inventory moves from `available` to `toBeSold`. On the next clock tick the row becomes 50 and the shares move to `sold`.
+  - [docs] A quantity that is not a multiple of 100 returns 200, then a row 56 with `locateError:67`, `R67: You can only offer for credit in lots of 100`.
+  - A reused `quoteReqID` returns 400 text `R114: Invalid duplicate UserOrderId`. The exact shape is unverified. [mock] `q` and `q.SU` count as the same id.
+- **Quote rows** [docs]: an ordinary HTB symbol gets one row, `locateType` 1 or 2 (two pools of the same product; `scenario.locate_pool_code` picks 2). A **Reg SHO threshold** symbol (`scenario.regsho`) gets two rows: the base `quoteReqID` with `locateType:3` (PreBorrow, `preBorrow:true`) and `quoteReqID + ".SU"` with `locateType:4` (SingleUse), each with its own price (`locate_price` as `{"PreBorrow": p, "SingleUse": p}`).
+- **Refusals before a pool is picked** give a single row, status 56, `locateType:0` [docs], checked in this order:
+  - [mock] an error queued with `POST /mock/locates/next-error` (status, code and text as given);
+  - not in lots of 100: `locateError:67` (above);
+  - ETB symbol: `locateError:56`, `R56: This symbol is Easy to Borrow.`
+  - current price below $0.50: `locateError:40`, `R40: Shorting stocks under $0.500000 is not allowed`.
+  - an open quote already exists for the symbol (Offered or still Quoting): `locateError:14`, `14 Locate is already pending.`
+  - no price for the symbol, or [mock] more than the remaining `scenario.locate_supply`: `locateError:11`, `11 No shares available. Please try again later.` (the guide shows one example with two spaces after the first period).
+- **One side of a Reg SHO pair refused** [docs]: a type missing from the price dict gets its row at 54 with `locateError:11`, keeping its `locateType`, while the other row is offered.
+- **Quoting** [docs: 81 exists]: [mock] with `scenario.locate_quote_polls = N`, each new row shows 81 (price 0, error 0, text `""`) for N history reads, then its outcome. Accept is ignored while 81. With `locate_sibling_polls = N` the `.SU` row is missing from the first N history reads. The defaults (0) give the outcome at once.
+- **Expiry:** an offer expires 30 virtual seconds after it reaches 65 (`locate_offer_seconds`), moving to 67 with `Quote expired.`
+- **Accept:** `POST /accounts/locates/accept` takes `{accountId, quoteReqID}` and always returns `{"locateAcceptSent":"true"}` [docs], even for an unknown, expired or still quoting id.
+  - On an Offered row: it moves to 50 with `filledShares` set, the inventory row of its `locateType` grows, and `totalLocateCosts` rises by `locatePrice × qty`, which is also deducted from cash. [mock] The remaining `locate_supply` drops by `qty`.
+  - [docs] Choosing between a Reg SHO pair is done by the id: the base id accepts PreBorrow, `<id>.SU` accepts SingleUse. The other row, if still Offered, moves to 67 `Quote expired.`
+  - [mock] Symbols in `scenario.locate_accept_ignored` acknowledge the accept and change nothing (the offer then expires).
+- **Cancel:** `DELETE /accounts/locates/cancel/accounts/{acc}/quoteReqID/{q}` returns `{"locateCancelSent":"true"}`. On an Offered row it moves to 52 with `Quote canceled.` Otherwise there is no change. [mock] It cancels only the row named: the base id does not cancel `.SU` (unverified).
+- **Sell-back:** `POST /accounts/locates/sell` takes `{account, symbol, quantity, locateType, quoteReqID}` and returns `{"locateSellbackSent":"true"}`. `locateType` is one of `Unknown`, `Locate`, `IntraDay`, `PreBorrow`, `SingleUse`. `Locate` and `IntraDay` select the type 1 or 2 row.
+  - It adds a history row with status 48, negative `locateShares` and the row's `locateType`.
+  - Inventory moves from `available` to `toBeSold`. On the next clock tick the row becomes 50 and the shares move to `sold`. [mock] The credit is `price × qty × scenario.locate_sellback_credit` (default 1.0; the real amount is undocumented).
   - A quantity that is not a multiple of 100 gets row 56 with `R67: You can only offer for credit in lots of 100`.
-  - More than `available` gets row 56 with `16 Insufficient shares.`
+  - More than the type's `available`, or a type not held, gets row 56 with `16 Insufficient shares.`
+  - [docs] SingleUse can only be sold back if no share was ever used to open a short. [mock] Otherwise: row 56, `locateError:16`, text `MOCK: SingleUse locate shares were used to open a short and cannot be credited back` (the real text is unknown).
 - **History row fields:** `accountId, symbol, quoteReqID, locateShares, filledShares, locateStatus, locateType, locatePrice, preBorrow, locateError, text, createdDate, updatedDate`, wrapped as `{"locateHistory":[...]}`.
-- **Inventory row fields:** `accountId, symbol, available, sold, toBeSold, unavailable, locateType`, wrapped as `{"locateInventory":[...]}`. The wrapper was observed on paper; the docs say a bare list.
+- **Inventory row fields:** `accountId, symbol, available, sold, toBeSold, unavailable, locateType`, wrapped as `{"locateInventory":[...]}`. The wrapper was observed on paper; the docs say a bare list. There is one row per (symbol, `locateType`).
 - **Missing body fields** on accept or sell return 400 text `- (root): <field> is required`. Wrong account returns 400 `{"statusCode":"BadRequest","message":"Account for User was not found, or User doesn't have entitlements.","detail":null}`.
-- **Locate type:** [mock] quotes produce `locateType: 1` (Locate). Reg SHO PreBorrow and SingleUse pairs are not implemented.
 - **Short orders:** [mock] a short is a Sell for more shares than the current long position.
-  - On an HTB symbol, the short part must be covered by inventory `available`. It is reserved when the order is placed and given back if the order is canceled or expires.
+  - On an HTB symbol, the short part must be covered by the sum of `available` over the symbol's inventory rows. The shares are reserved when the order is placed, taken from the rows in `scenario.locate_use_order` (default Locate, PreBorrow, SingleUse; which row the real API uses first is undocumented), and given back if the order is rejected, canceled or expires.
+  - When the short fills, its shares move from `available` to `unavailable`. On a cover [docs] Locate and PreBorrow shares go back to `available` (reusable the same day), and SingleUse shares are used up (they leave `unavailable` and do not come back).
   - Reads enrich `side` to `SellShort` or `BuyToCover` [docs]. The POST response keeps `Sell` or `Buy`.
+- **Day roll:** [mock] locates are valid for one day. At the new ET date, history, open offers, inventory, pending sell-backs and order reservations are cleared, and `locate_supply` is reset.
+- **Paper** [docs]: locates are live only. A paper quote returns 200 and the row is rejected with 56; accept and sell acknowledge and the inventory stays empty. The mock always follows the live behaviour.
+
+## Fault injection (mock only)
+`POST /mock/faults {"method","path","status"=500,"count"=1,"when"="before","delayMs"=0,"body"=""}` fails the next `count` matching `/v1/api` requests of the session. `path` is an fnmatch pattern on the URL path. `when:"before"` means the request is not processed; `when:"after"` means it is processed and only the response is lost (an "outcome unknown" case). The response has the given status and body (bare by default, like the real 429). `GET /mock/faults` lists the faults and `DELETE /mock/faults` clears them. `/mock` routes are never faulted.
 
 ## Not implemented
-WebSocket streams, options and multi-leg orders, Reg SHO pairs, rate limits, commissions, `AtTheOpening`, `Day_Plus` and `GTC_Plus` session rules (`AtTheOpening`/`Day_Plus` behave like `Day`; `GoodTillCrossing`/`GTC_Plus` persist like `GoodTillCancel`), extended hours.
+WebSocket streams, options and multi-leg orders, rate limits, commissions, `AtTheOpening`, `Day_Plus` and `GTC_Plus` session rules (`AtTheOpening`/`Day_Plus` behave like `Day`; `GoodTillCrossing`/`GTC_Plus` persist like `GoodTillCancel`), extended hours.

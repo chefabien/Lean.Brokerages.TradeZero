@@ -39,8 +39,22 @@ class Scenario:
     leverage: float = 1.0
     participation: float = 1.0  # max fraction of a bar's volume that can fill
     htb: set[str] = set()  # hard-to-borrow symbols (everything else is easy to borrow)
-    locate_price: dict[str, float] = {}  # per-share locate offer; absent -> "No shares available"
+    # Reg SHO threshold symbols: hard to borrow, and a quote gives two rows, PreBorrow (base id, locateType 3)
+    # and SingleUse (id + ".SU", locateType 4)
+    regsho: set[str] = set()
+    # per-share locate offer. A float prices every type; a dict prices types by name
+    # ("Locate", "PreBorrow", "SingleUse") and a missing type is refused (54/11). No entry -> "No shares available"
+    locate_price: dict[str, float | dict[str, float]] = {}
     locate_offer_seconds: int = 30
+    locate_quote_polls: int = 0  # history reads a new quote row shows 81 (Quoting) before its outcome
+    locate_sibling_polls: int = 0  # history reads before the ".SU" row of a Reg SHO quote appears
+    locate_supply: dict[str, int] = {}  # shares that can still be located today; absent -> unlimited
+    # inventory at the start: shares of the ordinary type, or {"PreBorrow": 200, "SingleUse": 100}
+    locate_inventory: dict[str, int | dict[str, int]] = {}
+    locate_accept_ignored: set[str] = set()  # accepts for these symbols are acknowledged but never applied
+    locate_sellback_credit: float = 1.0  # fraction of the locate price credited back on a sell-back
+    locate_pool_code: dict[str, int] = {}  # locateType of ordinary locates: 1 (default) or 2
+    locate_use_order: list[int] = [1, 2, 3, 4]  # which inventory a short uses first, by locateType
 
     def __init__(self, **params: Any):
         for key, value in params.items():
@@ -48,9 +62,12 @@ class Scenario:
                 raise ValueError(f"unknown scenario param: {key}")
             if key == "start" and isinstance(value, str):
                 value = parse_dt(value)
-            if key == "htb":
+            if isinstance(getattr(type(self), key), set):
                 value = set(value)
             setattr(self, key, value)
+
+    def hard_to_borrow(self, symbol: str) -> bool:
+        return symbol in self.htb or symbol in self.regsho
 
     def market_data(self) -> MarketData:
         return MarketData.from_csv(self.bars)

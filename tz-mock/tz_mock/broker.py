@@ -21,7 +21,12 @@ PERSISTENT_TIF = {"GoodTillCancel", "GTC_Plus", "GoodTillCrossing"}
 R130 = ("R130: Cancel Request Rejected: Original order not found or cancelable"
         "Original order not found or cancelable")
 HTB_REJECT = "MOCK: Short sale of hard-to-borrow symbol requires a locate"
-LOCATE_TYPES = {"Unknown": 0, "Locate": 1, "IntraDay": 1, "PreBorrow": 3, "SingleUse": 4}
+# `/sell` locateType names -> the locateType codes they cover (1 and 2 are the same product from two pools)
+LOCATE_TYPES = {"Unknown": {0}, "Locate": {1, 2}, "IntraDay": {1, 2}, "PreBorrow": {3}, "SingleUse": {4}}
+TYPE_NAMES = {1: "Locate", 2: "Locate", 3: "PreBorrow", 4: "SingleUse"}
+SINGLE_USE = 4
+NO_SHARES = "11 No shares available. Please try again later."
+SINGLE_USE_USED = "MOCK: SingleUse locate shares were used to open a short and cannot be credited back"
 
 
 class Broker:
@@ -42,6 +47,9 @@ class Broker:
         self.locates: dict[str, LocateRow] = {}
         self.inventory: dict[tuple[str, int], Inventory] = {}
         self.pending_sells: list[PendingSell] = []
+        self.locate_in_use: dict[str, list[list[int]]] = {}  # symbol -> [[locateType, shares]] held by shorts
+        self.locate_supply: dict[str, int] = dict(scenario.locate_supply)
+        self.next_locate_errors: dict[str, list[tuple[int, int, str]]] = {}  # symbol -> [(status, error, text)]
         self.fills: list[Fill] = []
         self._seq = 0
         self._pos_seq = 0
@@ -50,6 +58,9 @@ class Broker:
         self._expired_on: date | None = None
         self.sod: dict = {}
         self._snapshot_sod()
+        for symbol, seed in scenario.locate_inventory.items():
+            for name, shares in (seed.items() if isinstance(seed, dict) else [("Locate", seed)]):
+                self.set_inventory(symbol, name, int(shares))
 
     # ------------------------------------------------------------------ market / portfolio
     def price(self, symbol: str) -> float | None:
@@ -179,12 +190,17 @@ class Broker:
         if opening and opening * ref > self.buying_power():
             return "R100: Order would exceed max notional value"
 
-        if o.short_qty and o.symbol in self.scenario.htb:
-            inv = self.inventory.get((o.symbol, 1))
-            if not inv or inv.available < o.short_qty:
+        if o.short_qty and self.scenario.hard_to_borrow(o.symbol):
+            invs = self._inventories(o.symbol)
+            if sum(i.available for i in invs) < o.short_qty:
                 return HTB_REJECT
-            inv.available -= o.short_qty
-            o.reserved_locate = o.short_qty
+            need = o.short_qty
+            for inv in invs:
+                take = min(need, inv.available)
+                if take:
+                    inv.available -= take
+                    o.locate_reserved[inv.locate_type] = o.locate_reserved.get(inv.locate_type, 0) + take
+                    need -= take
 
         return self.scenario.on_order(self, o)
 
@@ -194,11 +210,12 @@ class Broker:
         self._release_locate(o)
 
     def _release_locate(self, o: Order) -> None:
-        if o.reserved_locate:
-            unfilled = min(o.reserved_locate, o.quantity - o.executed)
-            if unfilled > 0:
-                self.inventory[(o.symbol, 1)].available += unfilled
-            o.reserved_locate = 0
+        """Give the reserved locate shares the order did not use back to `available`."""
+        for code, shares in o.locate_reserved.items():
+            inv = self.inventory.get((o.symbol, code))
+            if inv is not None and shares > 0:
+                inv.available += shares
+        o.locate_reserved.clear()
 
     def _finish(self, o: Order, status: str) -> None:
         """Cancel/expire the remaining quantity."""
@@ -270,6 +287,12 @@ class Broker:
             o.limit_price = px
         self.shares_traded += qty
         self._used[(o.symbol, bar_ts)] = self._used.get((o.symbol, bar_ts), 0) + qty
+        pos = self.active_position(o.symbol)
+        held = pos.shares if pos else 0.0
+        if o.side == "Sell":
+            self._use_locates(o, int(max(0.0, qty - max(held, 0.0))))
+        else:
+            self._return_locates(o.symbol, int(min(qty, max(-held, 0.0))))
         self._apply_position(o.symbol, qty if o.side == "Buy" else -qty, px)
         self.fills.append(Fill(o.client_order_id, o.symbol, o.side, qty, px, self.now))
 
@@ -356,6 +379,7 @@ class Broker:
         self.day_realized = 0.0
         self.shares_traded = 0
         self._snapshot_sod()
+        self._locate_day_roll()
 
     # ------------------------------------------------------------------ JSON views
     def account_json(self, detail: bool) -> dict:
@@ -439,9 +463,74 @@ class Broker:
         }
 
     # ------------------------------------------------------------------ locates
+    def _pool_code(self, symbol: str) -> int:
+        return self.scenario.locate_pool_code.get(symbol, 1)
+
+    def _inventories(self, symbol: str) -> list[Inventory]:
+        """The symbol's inventory rows, in the order a short uses them (scenario.locate_use_order)."""
+        order = self.scenario.locate_use_order
+        rows = [i for (sym, _), i in self.inventory.items() if sym == symbol]
+        return sorted(rows, key=lambda i: order.index(i.locate_type) if i.locate_type in order else len(order))
+
+    def _inventory_row(self, symbol: str, code: int) -> Inventory:
+        return self.inventory.setdefault((symbol, code), Inventory(self.account_id, symbol, code))
+
+    def set_inventory(self, symbol: str, type_name: str, available: int) -> Inventory:
+        """Mock control: set the `available` shares of one inventory row (no quote, no cost)."""
+        if type_name not in ("Locate", "PreBorrow", "SingleUse"):
+            raise ValueError(f"unknown locateType {type_name!r}: use Locate, PreBorrow or SingleUse")
+        code = self._pool_code(symbol) if type_name == "Locate" else min(LOCATE_TYPES[type_name])
+        inv = self._inventory_row(symbol, code)
+        inv.available = available
+        return inv
+
+    def _use_locates(self, o: Order, opened: int) -> None:
+        """A short fill: move reserved shares to `unavailable`, remembering their type for the cover."""
+        for code in list(o.locate_reserved):
+            if opened <= 0:
+                break
+            take = min(opened, o.locate_reserved[code])
+            if take <= 0:
+                continue
+            o.locate_reserved[code] -= take
+            opened -= take
+            inv = self.inventory.get((o.symbol, code))
+            if inv is None:
+                continue
+            inv.unavailable += take
+            inv.used = True
+            self.locate_in_use.setdefault(o.symbol, []).append([code, take])
+
+    def _return_locates(self, symbol: str, covered: int) -> None:
+        """A cover: Locate/PreBorrow shares go back to `available` (reusable), SingleUse shares are used up."""
+        lots = self.locate_in_use.get(symbol, [])
+        while covered > 0 and lots:
+            code, shares = lots[0]
+            take = min(covered, shares)
+            covered -= take
+            if take == shares:
+                lots.pop(0)
+            else:
+                lots[0][1] -= take
+            inv = self.inventory.get((symbol, code))
+            if inv is not None:
+                inv.unavailable -= take
+                if code != SINGLE_USE:
+                    inv.available += take
+
+    def _locate_day_roll(self) -> None:
+        """Locates are valid for one day: history, offers, inventory and pending sell-backs start empty."""
+        self.locates.clear()
+        self.inventory.clear()
+        self.pending_sells.clear()
+        self.locate_in_use.clear()
+        self.locate_supply = dict(self.scenario.locate_supply)
+        for o in self.orders.values():
+            o.locate_reserved.clear()
+
     def _expire_locates(self) -> None:
         for row in self.locates.values():
-            if row.status == 65 and row.offered_at is not None and \
+            if row.status == 65 and row.offered_at is not None and not row.quoting and \
                     (self.now - row.offered_at).total_seconds() >= self.scenario.locate_offer_seconds:
                 row.status, row.text, row.updated = 67, "Quote expired.", self.now
 
@@ -450,41 +539,89 @@ class Broker:
             ps.row.status, ps.row.filled_shares, ps.row.updated = 50, -ps.qty, self.now
             ps.inventory.to_be_sold -= ps.qty
             ps.inventory.sold += ps.qty
-            self.locate_credits += ps.inventory.price * ps.qty
+            self.locate_credits += ps.inventory.price * ps.qty * self.scenario.locate_sellback_credit
         self.pending_sells.clear()
+
+    @staticmethod
+    def _sibling_id(qid: str) -> str:
+        return qid[:-3] if qid.endswith(".SU") else qid + ".SU"
+
+    def _offered(self, row: LocateRow) -> bool:
+        return row.status == 65 and not row.quoting
+
+    def _quote_refusal(self, symbol: str, qty: int) -> tuple[int, int, str] | None:
+        """(status, locateError, text) when the whole quote is refused before a pool is picked."""
+        queued = self.next_locate_errors.get(symbol)
+        if queued:
+            return queued.pop(0)
+        if qty % 100:
+            return 56, 67, "R67: You can only offer for credit in lots of 100"
+        if not self.scenario.hard_to_borrow(symbol):
+            return 56, 56, "R56: This symbol is Easy to Borrow."
+        px = self.price(symbol)
+        if px is not None and px < 0.5:
+            return 56, 40, "R40: Shorting stocks under $0.500000 is not allowed"
+        if any(r.symbol == symbol and (r.quoting or r.status == 65) for r in self.locates.values()):
+            return 56, 14, "14 Locate is already pending."
+        if symbol not in self.scenario.locate_price:
+            return 56, 11, NO_SHARES
+        supply = self.locate_supply.get(symbol)
+        if supply is not None and qty > supply:
+            return 56, 11, NO_SHARES
+        return None
+
+    def _type_price(self, symbol: str, code: int) -> float | None:
+        price = self.scenario.locate_price[symbol]
+        if isinstance(price, dict):
+            price = price.get(TYPE_NAMES[code])
+        return None if price is None else float(price)
 
     def locate_quote(self, symbol: str, qty: int, qid: str) -> bool:
         """Returns False when quoteReqID was already used."""
-        if qid in self.locates:
+        if qid in self.locates or self._sibling_id(qid) in self.locates:
             return False
         self._expire_locates()
-        row = LocateRow(self.account_id, symbol, qid, qty, status=56, created=self.now, updated=self.now)
-        px = self.price(symbol)
-        if symbol not in self.scenario.htb:
-            row.error, row.text = 56, "R56: This symbol is Easy to Borrow."
-        elif px is not None and px < 0.5:
-            row.error, row.text = 40, "R40: Shorting stocks under $0.500000 is not allowed"
-        elif any(r.symbol == symbol and r.status == 65 for r in self.locates.values()):
-            row.error, row.text = 14, "14 Locate is already pending."
-        elif symbol not in self.scenario.locate_price:
-            row.error, row.text = 11, "11 No shares available. Please try again later."
+        refusal = self._quote_refusal(symbol, qty)
+        if refusal:
+            row = LocateRow(self.account_id, symbol, qid, qty, status=refusal[0], created=self.now,
+                            updated=self.now, locate_type=0, error=refusal[1], text=refusal[2])
+            rows = [row]
+        elif symbol in self.scenario.regsho:
+            rows = [self._quote_row(symbol, qty, qid, 3), self._quote_row(symbol, qty, qid + ".SU", SINGLE_USE)]
+            rows[1].hidden_reads = self.scenario.locate_sibling_polls
         else:
-            row.status, row.text, row.offered_at = 65, "", self.now
-            row.price = float(self.scenario.locate_price[symbol])
-        self.locates[qid] = row
+            rows = [self._quote_row(symbol, qty, qid, self._pool_code(symbol))]
+        for row in rows:
+            row.quoting_reads = self.scenario.locate_quote_polls
+            if self._offered(row):
+                row.offered_at = self.now
+            self.locates[row.quote_req_id] = row
         return True
+
+    def _quote_row(self, symbol: str, qty: int, qid: str, code: int) -> LocateRow:
+        row = LocateRow(self.account_id, symbol, qid, qty, status=54, created=self.now, updated=self.now,
+                        locate_type=code, error=11, text=NO_SHARES)
+        price = self._type_price(symbol, code)
+        if price is not None:
+            row.status, row.error, row.text, row.price = 65, 0, "", price
+        return row
 
     def locate_accept(self, qid: str) -> None:
         self._expire_locates()
         row = self.locates.get(qid)
-        if row is None or row.status != 65:
+        if row is None or not self._offered(row) or row.symbol in self.scenario.locate_accept_ignored:
             return
         row.status, row.filled_shares, row.updated = 50, row.locate_shares, self.now
-        inv = self.inventory.setdefault((row.symbol, row.locate_type),
-                                        Inventory(self.account_id, row.symbol, row.locate_type))
+        inv = self._inventory_row(row.symbol, row.locate_type)
         inv.available += row.locate_shares
         inv.price = row.price
         self.locate_costs += row.price * row.locate_shares
+        if row.symbol in self.locate_supply:
+            self.locate_supply[row.symbol] -= row.locate_shares
+        sibling = self.locates.get(self._sibling_id(qid))
+        if sibling is not None and sibling.status == 65:
+            sibling.status, sibling.text, sibling.updated = 67, "Quote expired.", self.now
+            sibling.quoting_reads = sibling.hidden_reads = 0
 
     def locate_cancel(self, qid: str) -> None:
         self._expire_locates()
@@ -492,7 +629,8 @@ class Broker:
         if row is None:
             return
         if row.status == 65:
-            row.status, row.text, row.updated = 52, "Quote canceled.", self.now
+            row.status, row.error, row.text, row.updated = 52, 0, "Quote canceled.", self.now
+            row.quoting_reads = row.hidden_reads = 0
         for ps in list(self.pending_sells):
             if ps.row is row:
                 row.status, row.updated = 52, self.now
@@ -503,14 +641,16 @@ class Broker:
     def locate_sell(self, symbol: str, qty: int, locate_type: str, qid: str) -> bool:
         if qid in self.locates:
             return False
-        t = LOCATE_TYPES[locate_type]
-        row = LocateRow(self.account_id, symbol, qid, -qty, status=48, created=self.now,
-                        updated=self.now, locate_type=t)
-        inv = self.inventory.get((symbol, t))
+        codes = LOCATE_TYPES[locate_type]
+        inv = next((i for i in self._inventories(symbol) if i.locate_type in codes), None)
+        row = LocateRow(self.account_id, symbol, qid, -qty, status=48, created=self.now, updated=self.now,
+                        locate_type=inv.locate_type if inv else min(codes))
         if qty % 100:
             row.status, row.error, row.text = 56, 67, "R67: You can only offer for credit in lots of 100"
         elif inv is None or inv.available < qty:
             row.status, row.error, row.text = 56, 16, "16 Insufficient shares."
+        elif inv.locate_type == SINGLE_USE and inv.used:
+            row.status, row.error, row.text = 56, 16, SINGLE_USE_USED
         else:
             inv.available -= qty
             inv.to_be_sold += qty
@@ -520,10 +660,32 @@ class Broker:
 
     def locate_history(self) -> list[dict]:
         self._expire_locates()
-        return [r.to_json() for r in self.locates.values()]
+        out = []
+        for row in self.locates.values():
+            if row.hidden_reads:
+                row.hidden_reads -= 1
+                continue
+            out.append(row.to_json())
+            if row.quoting_reads:
+                row.quoting_reads -= 1
+                if not row.quoting_reads and row.status == 65:
+                    row.offered_at = row.updated = self.now
+        return out
 
     def locate_inventory(self) -> list[dict]:
         return [i.to_json() for i in self.inventory.values()]
+
+    def locate_state(self) -> dict:
+        return {
+            "inventory": [i.to_json() | {"used": i.used} for i in self.inventory.values()],
+            "openQuotes": [r.quote_req_id for r in self.locates.values() if r.quoting or r.status == 65],
+            "inUse": {s: lots for s, lots in self.locate_in_use.items() if lots},
+            "supply": self.locate_supply,
+            "pendingSellBacks": [ps.row.quote_req_id for ps in self.pending_sells],
+            "nextErrors": {s: q for s, q in self.next_locate_errors.items() if q},
+            "locateCosts": money(self.locate_costs),
+            "locateCredits": money(self.locate_credits),
+        }
 
     # ------------------------------------------------------------------ debug
     def state_json(self) -> dict:
@@ -534,4 +696,5 @@ class Broker:
             "prices": {s: self.md.price(s, self.now) for s in self.md.symbols},
             "workingOrders": [o.client_order_id for o in self.orders.values() if o.working],
             "terminalOrders": sum(o.status in TERMINAL for o in self.orders.values()),
+            "locates": self.locate_state(),
         }

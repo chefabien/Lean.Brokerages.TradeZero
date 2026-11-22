@@ -7,7 +7,8 @@ and the state needs no locking.
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from fnmatch import fnmatchcase
 
 from . import scenarios
 from .broker import Broker
@@ -18,9 +19,38 @@ def account_id_for(key: str) -> str:
 
 
 @dataclass
+class Fault:
+    """A one-shot HTTP failure injected with POST /mock/faults."""
+    method: str
+    path: str  # fnmatch pattern on the URL path, e.g. "/v1/api/accounts/locates/accept" or "*/locates/*"
+    status: int = 500
+    count: int = 1
+    when: str = "before"  # "before": the request is not processed; "after": it is processed, the response lost
+    delay_ms: int = 0
+    body: str = ""
+
+    def matches(self, method: str, path: str) -> bool:
+        return self.count > 0 and self.method.upper() == method.upper() and fnmatchcase(path, self.path)
+
+    def to_json(self) -> dict:
+        return {"method": self.method, "path": self.path, "status": self.status, "count": self.count,
+                "when": self.when, "delayMs": self.delay_ms, "body": self.body}
+
+
+@dataclass
 class Session:
     key: str
     broker: Broker
+    faults: list[Fault] = field(default_factory=list)
+
+    def take_fault(self, method: str, path: str) -> Fault | None:
+        for fault in self.faults:
+            if fault.matches(method, path):
+                fault.count -= 1
+                if fault.count == 0:
+                    self.faults.remove(fault)
+                return fault
+        return None
 
 
 class SessionStore:
@@ -38,6 +68,10 @@ class SessionStore:
         session = Session(key, Broker(account_id_for(key), scenario))
         self._sessions[key] = session
         return session
+
+    def peek(self, key: str) -> Session | None:
+        """The session if it exists, without creating one."""
+        return self._sessions.get(key)
 
     def drop(self, key: str) -> None:
         self._sessions.pop(key, None)

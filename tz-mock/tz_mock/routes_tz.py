@@ -147,7 +147,7 @@ async def routes(request: Request, account_id: str):
 @router.get("/accounts/{account_id}/is-easy-to-borrow/symbol/{symbol}")
 async def is_easy_to_borrow(request: Request, account_id: str, symbol: str):
     b = account(request, account_id, "IsEasyToBorrow")
-    return {"isEasyToBorrow": symbol not in b.scenario.htb}
+    return {"isEasyToBorrow": not b.scenario.hard_to_borrow(symbol)}
 
 
 # ---------------------------------------------------------------------------- history (empty)

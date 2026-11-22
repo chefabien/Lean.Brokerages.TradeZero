@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 
 WORKING = {"PendingNew", "New", "PartiallyFilled", "PendingCancel", "Accepted"}
@@ -49,7 +49,7 @@ class Order:
     last_updated: datetime | None = None
     triggered: bool = False
     short_qty: int = 0  # part of the order that opens/increases a short
-    reserved_locate: int = 0  # HTB locate shares reserved for this order
+    locate_reserved: dict[int, int] = field(default_factory=dict)  # locateType -> HTB locate shares reserved
     enriched_side: str | None = None  # SellShort / BuyToCover, shown on reads
 
     @property
@@ -166,21 +166,28 @@ class LocateRow:
     error: int = 0
     text: str | None = None
     offered_at: datetime | None = None
+    quoting_reads: int = 0  # history reads still showing 81 (Quoting); `status` is the outcome after that
+    hidden_reads: int = 0  # history reads before the row appears at all (a late ".SU" sibling)
+
+    @property
+    def quoting(self) -> bool:
+        return self.quoting_reads > 0 or self.hidden_reads > 0
 
     def to_json(self) -> dict:
+        quoting = self.quoting_reads > 0
         return {
             "accountId": self.account_id,
             "createdDate": ts(self.created),
             "filledShares": self.filled_shares,
-            "locateError": self.error,
-            "locatePrice": self.price,
+            "locateError": 0 if quoting else self.error,
+            "locatePrice": 0.0 if quoting else self.price,
             "locateShares": self.locate_shares,
-            "locateStatus": self.status,
+            "locateStatus": 81 if quoting else self.status,
             "locateType": self.locate_type,
             "preBorrow": self.locate_type == 3,
             "quoteReqID": self.quote_req_id,
             "symbol": self.symbol,
-            "text": self.text,
+            "text": "" if quoting else self.text,
             "updatedDate": ts(self.updated),
         }
 
@@ -195,6 +202,7 @@ class Inventory:
     to_be_sold: int = 0
     unavailable: int = 0
     price: float = 0.0  # per-share cost of the last accepted locate (refunded on sell-back)
+    used: bool = False  # a share was used to open a short (SingleUse can then no longer be sold back)
 
     def to_json(self) -> dict:
         return {

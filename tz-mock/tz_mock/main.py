@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 
 from fastapi import FastAPI, Request
@@ -18,6 +19,22 @@ def create_app() -> FastAPI:
     app.state.sessions = SessionStore()
     app.include_router(routes_tz.router)
     app.include_router(routes_mock.router)
+
+    @app.middleware("http")
+    async def _inject_faults(request: Request, call_next):
+        key = request.headers.get("TZ-API-KEY-ID")
+        session = app.state.sessions.peek(key) if key else None
+        fault = None
+        if session is not None and request.url.path.startswith("/v1/api"):
+            fault = session.take_fault(request.method, request.url.path)
+        if fault is None:
+            return await call_next(request)
+        if fault.delay_ms:
+            await asyncio.sleep(fault.delay_ms / 1000)
+        if fault.when == "after":
+            await call_next(request)  # processed, but the client never sees the answer
+        return Response(fault.body, status_code=fault.status,
+                        media_type="text/plain; charset=utf-8" if fault.body else None)
 
     @app.exception_handler(errors.TZError)
     async def _tz_error(request: Request, exc: errors.TZError) -> Response:
