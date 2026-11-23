@@ -14,8 +14,12 @@
 */
 
 using System;
+using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
 using Newtonsoft.Json.Linq;
 using NUnit.Framework;
 using QuantConnect.Orders;
@@ -336,6 +340,106 @@ namespace QuantConnect.Brokerages.TradeZero.Tests
             }
             finally
             {
+                File.Delete(path);
+            }
+        }
+
+        [Test]
+        public void HandlerPlacingOrdersOnAFillIsNotBlockedByTheBrokerage()
+        {
+            // Lean runs the algorithm's OnOrderEvent inside the brokerage's callback, and places the orders it sends on
+            // its transaction thread while the handler waits (WaitForOrderSubmission, 1 s each). Raised while the
+            // brokerage held its order lock, a fill made each of those PlaceOrder calls wait for the handler instead.
+            using var h = new TradeZeroHarness();
+            var entry = new MarketOrder(Aapl, 10, Now);
+            var exits = Enumerable.Range(1, 5).Select(i => (Order)new LimitOrder(Aapl, -2, 300m + i, Now)).ToList();
+            exits.ForEach(h.Orders.Add);
+            var took = new List<TimeSpan>();
+            h.Brokerage.OrdersStatusChanged += (_, events) =>
+            {
+                if (!events.Any(e => e.OrderId == entry.Id && e.Status == OrderStatus.Filled))
+                {
+                    return;
+                }
+                foreach (var exit in exits)
+                {
+                    var watch = Stopwatch.StartNew();
+                    var placed = Task.Run(() => h.Brokerage.PlaceOrder(exit));
+                    var done = placed.Wait(TimeSpan.FromSeconds(3)) && placed.Result;
+                    lock (took)
+                    {
+                        took.Add(done ? watch.Elapsed : TimeSpan.MaxValue);
+                    }
+                }
+            };
+
+            Assert.IsTrue(h.Place(entry));
+            h.WaitForStatus(entry, OrderStatus.Filled);
+            h.WaitFor(() => { lock (took) { return took.Count == exits.Count; } }, "the handler to place the exits", 30);
+            lock (took)
+            {
+                Assert.IsTrue(took.All(t => t < TimeSpan.FromSeconds(3)), $"PlaceOrder calls from the handler: {string.Join(", ", took)}");
+            }
+            foreach (var exit in exits)
+            {
+                h.WaitForStatus(exit, OrderStatus.Submitted);
+                Assert.AreEqual(OrderStatus.Submitted, h.EventsFor(exit).First().Status);
+            }
+        }
+
+        [Test]
+        public void OrdersArePlannedFromFillsNotDeliveredToLeanYet()
+        {
+            var path = Path.Combine(Path.GetTempPath(), $"tz-mock-api-{Guid.NewGuid():N}.jsonl");
+            var gate = new ManualResetEventSlim(false);
+            var entry = new MarketOrder(Aapl, 10, Now);
+            var exit = new MarketOrder(Aapl, -10, Now);
+            try
+            {
+                using (var h = new TradeZeroHarness(apiLogFile: path))
+                {
+                    // a slow handler holds the delivery of everything after the entry's Submitted, its fill included
+                    h.Brokerage.OrdersStatusChanged += (_, events) =>
+                    {
+                        if (events.Any(e => e.OrderId == entry.Id && e.Status == OrderStatus.Submitted))
+                        {
+                            gate.Wait(TimeSpan.FromSeconds(20));
+                        }
+                    };
+                    try
+                    {
+                        Assert.IsTrue(h.Place(entry));
+                        // not h.Holdings: it waits for the deliveries
+                        var lean = h.Securities.GetSecurity(Aapl).Holdings;
+                        var watch = Stopwatch.StartNew();
+                        while (h.Brokerage.HoldingsQuantity(Aapl) != 10m && watch.Elapsed < TimeSpan.FromSeconds(10))
+                        {
+                            h.Brokerage.PollOnce(force: true);
+                            Thread.Sleep(50);
+                        }
+                        Assert.AreEqual(10m, h.Brokerage.HoldingsQuantity(Aapl));
+                        Assert.AreEqual(0m, lean.Quantity, "the fill must not be delivered yet");
+
+                        h.Orders.Add(exit);
+                        Assert.IsTrue(h.Brokerage.PlaceOrder(exit));
+                    }
+                    finally
+                    {
+                        gate.Set();
+                    }
+                    h.WaitForStatus(exit, OrderStatus.Filled);
+                    Assert.AreEqual(0m, h.Holdings("AAPL"));
+                }
+
+                var legs = File.ReadAllLines(path).Select(JObject.Parse)
+                    .Where(l => (string)l["msg"] == "submit leg" && (int)l["data"]!["leanOrderId"]! == exit.Id)
+                    .ToList();
+                Assert.AreEqual(1, legs.Count);
+                Assert.AreEqual("Close", (string)legs[0]["data"]!["request"]!["openClose"], "selling a long held at the broker closes it");
+            }
+            finally
+            {
+                gate.Set();
                 File.Delete(path);
             }
         }

@@ -90,6 +90,7 @@ namespace QuantConnect.Brokerages.TradeZero.Tests
         {
             get
             {
+                Sync();
                 lock (_events)
                 {
                     return _events.ToList();
@@ -101,6 +102,7 @@ namespace QuantConnect.Brokerages.TradeZero.Tests
         {
             get
             {
+                Sync();
                 lock (_messages)
                 {
                     return _messages.ToList();
@@ -129,9 +131,25 @@ namespace QuantConnect.Brokerages.TradeZero.Tests
             return Brokerage.UpdateOrder(order);
         }
 
-        public decimal Holdings(string ticker) => Securities.GetSecurity(Equity(ticker)).Holdings.Quantity;
+        public decimal Holdings(string ticker)
+        {
+            Sync();
+            return Securities.GetSecurity(Equity(ticker)).Holdings.Quantity;
+        }
 
-        public OrderStatus StatusOf(Order order) => Orders.GetOrderById(order.Id).Status;
+        public OrderStatus StatusOf(Order order)
+        {
+            Sync();
+            return Orders.GetOrderById(order.Id).Status;
+        }
+
+        /// <summary>
+        /// Waits until the brokerage has delivered every callback raised so far (it delivers them on its own thread)
+        /// </summary>
+        public void Sync()
+        {
+            Assert.IsTrue(Brokerage.WaitForCallbacks(TimeSpan.FromSeconds(10)), "the brokerage's callbacks were not delivered within 10 s");
+        }
 
         public decimal FilledQuantity(Order order) => EventsFor(order).Sum(e => e.FillQuantity);
 

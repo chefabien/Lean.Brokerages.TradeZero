@@ -118,6 +118,7 @@ namespace QuantConnect.Brokerages.TradeZero.Tests
             Assert.IsTrue(_brokerage.PlaceOrder(order), string.Join(" | ", events));
             System.Threading.Thread.Sleep(2000);
             _brokerage.PollOnce(force: true);
+            _brokerage.WaitForCallbacks(TimeSpan.FromSeconds(10));
             Assert.AreEqual(OrderStatus.Submitted, _orders.GetOrderById(order.Id).Status, string.Join(" | ", events));
 
             Assert.IsTrue(_brokerage.CancelOrder(order));

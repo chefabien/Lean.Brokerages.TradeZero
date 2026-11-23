@@ -115,6 +115,7 @@ namespace QuantConnect.Brokerages.TradeZero
                     settings.ApiLogMaxMb * 1024L * 1024L, settings.ApiLogBodies);
             _client = new TradeZeroRestClient(settings.ApiUrl, settings.ApiKeyId, settings.ApiSecretKey, _apiLogger, transport: httpTransport);
             _runTag = DateTime.UtcNow.ToString("MMddHHmmss", System.Globalization.CultureInfo.InvariantCulture);
+            InitializeCallbacks();
             InitializeLocates();
 
             if (_apiLogger.Enabled)
@@ -206,6 +207,7 @@ namespace QuantConnect.Brokerages.TradeZero
         public override void Dispose()
         {
             Disconnect();
+            StopCallbacks();
             _client.Dispose();
             _apiLogger.Dispose();
             _pollWakeUp.Dispose();
@@ -521,7 +523,7 @@ namespace QuantConnect.Brokerages.TradeZero
 
         /// <summary>
         /// Warns when TradeZero's positions differ from Lean's holdings twice in a row, for tickers
-        /// without working orders (fills in flight would make them differ briefly)
+        /// without working orders or undelivered fills (fills in flight would make them differ briefly)
         /// </summary>
         /// <remarks>
         /// Compared by current ticker, Lean's side from Lean's own symbols: a symbol rebuilt from TradeZero's
@@ -540,6 +542,7 @@ namespace QuantConnect.Brokerages.TradeZero
             {
                 busy = _ordersByLeanId.Values.Where(t => !t.Done).Select(t => t.Ticker).ToHashSet();
             }
+            busy.UnionWith(TickersWithUndeliveredFills());
 
             // null outside an algorithm (tests): Lean's holdings are then read one symbol at a time
             var leanByTicker = LeanHoldingsByTicker();

@@ -33,7 +33,8 @@ namespace QuantConnect.Brokerages.TradeZero
         // - an order crossing zero: a closing leg, then an opening leg placed when the first one is filled;
         // - an updated order: the current leg is canceled and a new leg is placed for the remaining quantity.
         // Fills are accumulated over all legs, so Lean sees one order. All state below is guarded by _orderLock;
-        // Lean order events are emitted while holding it, so they come out in order.
+        // Lean order events are queued while holding it, so they are delivered in order (TradeZeroBrokerage.Events.cs),
+        // and orders are planned from HoldingsQuantity: Lean's holdings plus the fills not delivered yet.
 
         private sealed class Leg
         {
@@ -143,7 +144,7 @@ namespace QuantConnect.Brokerages.TradeZero
                 SemaphoreSlim locateGate = null;
                 try
                 {
-                    var holdings = _securityProvider.GetHoldingsQuantity(order.Symbol);
+                    var holdings = HoldingsQuantity(order.Symbol);
                     var legs = TradeZeroOrderMapper.PlanLegs(holdings, order.Quantity);
                     var tracked = new TrackedOrder
                     {
@@ -298,7 +299,7 @@ namespace QuantConnect.Brokerages.TradeZero
                     tracked.TotalQuantity = order.AbsoluteQuantity;
                     // re-plan the rest from the current position: it may now close, open, or cross zero
                     var remaining = tracked.Sign * (tracked.TotalQuantity - tracked.FilledQuantity);
-                    var holdings = _securityProvider.GetHoldingsQuantity(order.Symbol);
+                    var holdings = HoldingsQuantity(order.Symbol);
                     var legs = TradeZeroOrderMapper.PlanLegs(holdings, remaining);
                     tracked.CrossesZero = legs.Count > 1;
                     tracked.PendingLeg = legs.Count > 1 ? legs[1] : null;

@@ -95,11 +95,13 @@ namespace QuantConnect.Brokerages.TradeZero.Tests
 
             Assert.AreEqual(itp, brokerage.ResolveLeanSymbol("ITP"));
             Assert.AreEqual(itp, brokerage.ResolveLeanSymbol("itp"));
+            Assert.IsTrue(brokerage.WaitForCallbacks(TimeSpan.FromSeconds(5)));
             Assert.IsEmpty(messages);
 
             var unknown = brokerage.ResolveLeanSymbol("ZZZQX");
             Assert.IsTrue(TradeZeroBrokerage.IsUnmapped(unknown));
             brokerage.ResolveLeanSymbol("ZZZQX");
+            Assert.IsTrue(brokerage.WaitForCallbacks(TimeSpan.FromSeconds(5)));
             var warning = messages.Single();
             Assert.AreEqual("UnmappedSymbol", warning.Code);
             StringAssert.Contains("ZZZQX", warning.Message);

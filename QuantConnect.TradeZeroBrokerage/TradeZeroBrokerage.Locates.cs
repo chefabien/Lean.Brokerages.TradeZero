@@ -218,7 +218,7 @@ namespace QuantConnect.Brokerages.TradeZero
             {
                 return null;
             }
-            var legs = TradeZeroOrderMapper.PlanLegs(_securityProvider.GetHoldingsQuantity(order.Symbol), remaining);
+            var legs = TradeZeroOrderMapper.PlanLegs(HoldingsQuantity(order.Symbol), remaining);
             var shortLeg = legs.FirstOrDefault(IsShortLeg);
             if (shortLeg == null || ResolveEasyToBorrow(tracked.Ticker) != false)
             {
