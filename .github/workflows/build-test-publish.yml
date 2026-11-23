@@ -20,8 +20,8 @@ on:
   workflow_dispatch:
     inputs:
       lean_version:
-        description: Lean version to build and test against (quantconnect/lean:<version>)
-        default: "18278"
+        description: Lean version to build and test against (quantconnect/lean:<version>); empty = the pinned LEAN_VERSION
+        default: ""
       release_tag:
         description: Existing release tag to add the asset to (builds that tag's code); empty = no publishing
         default: ""
@@ -34,7 +34,8 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # bump deliberately: the published asset is built for exactly this Lean version
+  # The pinned Lean version: the only place it is set (the lean_version input overrides it on manual runs).
+  # Bump deliberately: the published asset is built for exactly this Lean version.
   LEAN_VERSION: ${{ inputs.lean_version || '18278' }}
   LEAN_REF: ${{ inputs.lean_ref || 'master' }}
   REPO_DIR: Lean.Brokerages.TradeZero

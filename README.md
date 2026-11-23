@@ -197,7 +197,7 @@ python3 tradezero_live.py --data-feed polygon --algorithm ./MyAlgorithm --worksp
 
 ## CI/CD (GitHub Actions)
 
-[.github/workflows/build-test-publish.yml](.github/workflows/build-test-publish.yml) is a single job pinned to one LEAN version (`LEAN_VERSION`, currently 18278; bump it deliberately). Each stage runs only if the previous one passed:
+[.github/workflows/build-test-publish.yml](.github/workflows/build-test-publish.yml) is a single job pinned to one LEAN version (`LEAN_VERSION` in the workflow's `env`; bump it deliberately). Each stage runs only if the previous one passed:
 
 | Stage | Runs on | What it does |
 |---|---|---|
