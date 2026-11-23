@@ -197,6 +197,52 @@ class MiscTests(unittest.TestCase):
             (folder / "data").mkdir()
             self.assertEqual((folder / "data").resolve(), tz.read_workspace(folder).data)
 
+    def test_workspace_providers_replace_the_template_and_set_wins(self):
+        template = {"map-file-provider": "QuantConnect.Data.Auxiliary.LocalDiskMapFileProvider",
+                    "factor-file-provider": "QuantConnect.Data.Auxiliary.LocalDiskFactorFileProvider"}
+        settings = {"map-file-provider": "LocalZipMapFileProvider", "factor-file-provider": "LocalZipFactorFileProvider",
+                    "organization-id": "o", "data-folder": "data"}
+        kwargs = dict(algorithm_name="A", language="python", algorithm_location="/Algorithm/main.py",
+                      environment="paper", api_url=None)
+        config = tz.build_config(template, tz.FEEDS["fake"], {}, extra={}, workspace_settings=settings, **kwargs)
+        self.assertEqual("LocalZipMapFileProvider", config["map-file-provider"])
+        self.assertEqual("LocalZipFactorFileProvider", config["factor-file-provider"])
+        self.assertNotIn("organization-id", config)
+        self.assertEqual("/Lean/Data/", tz.build_config({"data-folder": "/Lean/Data/"}, tz.FEEDS["fake"], {}, extra={},
+                                                         workspace_settings=settings, **kwargs)["data-folder"])
+        config = tz.build_config(template, tz.FEEDS["fake"], {}, extra={"map-file-provider": "X"},
+                                 workspace_settings=settings, **kwargs)
+        self.assertEqual("X", config["map-file-provider"])
+        self.assertEqual(template["map-file-provider"],
+                         tz.build_config(template, tz.FEEDS["fake"], {}, extra={}, **kwargs)["map-file-provider"])
+
+    def test_check_auxiliary_data(self):
+        from datetime import date
+        zips = {"map-file-provider": "LocalZipMapFileProvider", "factor-file-provider": "QuantConnect.Data.Auxiliary.LocalZipFactorFileProvider"}
+        today = date(2026, 11, 23)
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp)
+            maps, factors = data / "equity/usa/map_files", data / "equity/usa/factor_files"
+            maps.mkdir(parents=True)
+            factors.mkdir(parents=True)
+            with self.assertRaisesRegex(tz.LauncherError, "there are none"):
+                tz.check_auxiliary_data(zips, data, today)
+            (maps / "map_files_20261019.zip").touch()  # 35 days: beyond LEAN's lookback
+            (maps / "map_files_2026111.zip").touch()   # not a date
+            (factors / "factor_files_20261121.zip").touch()
+            with self.assertRaisesRegex(tz.LauncherError, "map_files_20261019.zip"):
+                tz.check_auxiliary_data(zips, data, today)
+            (maps / "map_files_20261023.zip").touch()  # 31 days: yesterday - 30, still found by LEAN
+            warnings = tz.check_auxiliary_data(zips, data, today)
+            self.assertEqual(1, len(warnings))
+            self.assertIn("map files are 31 days old", warnings[0])
+            (maps / "map_files_20261119.zip").touch()
+            self.assertEqual([], tz.check_auxiliary_data(zips, data, today))
+            loose = dict(zips, **{"map-file-provider": "QuantConnect.Data.Auxiliary.LocalDiskMapFileProvider"})
+            warnings = tz.check_auxiliary_data(loose, data, today)
+            self.assertEqual(1, len(warnings))
+            self.assertIn("only the loose map files CSVs", warnings[0])
+
     def test_docker_command_mounts_the_object_store_read_write(self):
         command = tz.docker_command(18274, config=Path("/o/config.json"), plugins=Path("/c/p"), algorithm=Path("/a"),
                                     results=Path("/o/results"), storage=Path("/w/storage"),

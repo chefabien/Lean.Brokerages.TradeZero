@@ -18,7 +18,8 @@ is entitled to them, as they do under lean-cli. The launcher therefore also writ
 API token and organization id into config.json (from QC_USER_ID / QC_API_ACCESS_TOKEN / QC_ORGANIZATION_ID,
 or from lean-cli's ~/.lean/credentials and the lean.json of a workspace given with --workspace).
 With --workspace, the workspace's data folder (lean.json "data-folder", map and factor files included) is
-mounted at /Lean/Data instead of the sample data inside the image, as lean-cli does.
+mounted at /Lean/Data instead of the sample data inside the image, as lean-cli does, and LEAN reads it with the
+map and factor file providers its lean.json names. The launcher checks that their zips are there and recent.
 
 Python 3.9+, standard library only. Needs docker on the PATH.
 """
@@ -40,6 +41,7 @@ import urllib.error
 import urllib.request
 import zipfile
 from dataclasses import dataclass, field
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 LEAN_IMAGE_REPO = "quantconnect/lean"
@@ -204,8 +206,10 @@ def detect_algorithm_class(main_py: Path) -> str | None:
 
 
 def build_config(template: dict, feed: Feed, feed_values: dict, *, algorithm_name: str, language: str,
-                 algorithm_location: str, environment: str, api_url: str | None, extra: dict) -> dict:
+                 algorithm_location: str, environment: str, api_url: str | None, extra: dict,
+                 workspace_settings: dict | None = None) -> dict:
     config = json.loads(json.dumps(template))  # deep copy
+    config.update(workspace_engine_settings(workspace_settings or {}))
     config.update({
         "environment": "live-tradezero",
         "algorithm-type-name": algorithm_name,
@@ -275,6 +279,81 @@ def read_workspace(folder: Path) -> Workspace:
     if not data.is_dir():
         raise LauncherError(f"The workspace data folder {data} (lean.json \"data-folder\") does not exist")
     return Workspace(settings, data.resolve())
+
+
+# lean.json settings saying how LEAN reads the workspace data, passed on as lean-cli does. A lean-cli workspace
+# names the zip providers (LocalZipMapFileProvider, LocalZipFactorFileProvider), which read the map and factor
+# file zips `lean data download` writes. The template's LocalDisk* providers read only loose CSVs: in a workspace
+# that holds zips, LEAN then finds no map file for most tickers, so it computes no rename, split or delisting,
+# and a ticker held at the broker resolves to another security than the one the algorithm trades.
+WORKSPACE_ENGINE_KEYS = ("map-file-provider", "factor-file-provider")
+
+# LEAN's LocalZip* providers look for yesterday's zip (New York) and up to 30 days before, and fail without one
+ZIP_LOOKBACK_DAYS = 30
+# Older than this, the zips miss recent renames, splits and delistings (lean-cli's own threshold)
+ZIP_STALE_DAYS = 7
+AUXILIARY_ZIPS = {
+    "map-file-provider": ("LocalZipMapFileProvider", "map_files", "map files"),
+    "factor-file-provider": ("LocalZipFactorFileProvider", "factor_files", "factor files"),
+}
+
+
+def workspace_engine_settings(settings: dict) -> dict:
+    """The workspace's lean.json values of WORKSPACE_ENGINE_KEYS, for the LEAN config."""
+    return {key: settings[key] for key in WORKSPACE_ENGINE_KEYS if key in settings}
+
+
+def newest_zip_date(folder: Path, prefix: str) -> date | None:
+    """The date of the newest <prefix>_YYYYMMDD.zip in folder, or None."""
+    dates = []
+    for path in folder.glob(f"{prefix}_*.zip"):
+        match = re.fullmatch(rf"{prefix}_(\d{{8}})\.zip", path.name)
+        if match:
+            try:
+                dates.append(datetime.strptime(match.group(1), "%Y%m%d").date())
+            except ValueError:
+                pass
+    return max(dates, default=None)
+
+
+def check_auxiliary_data(config: dict, data: Path, today: date) -> list[str]:
+    """Checks the map and factor files LEAN will read from the workspace data; returns the warnings.
+
+    Raises LauncherError when a LocalZip* provider would find no zip (LEAN fails at startup).
+    today: the New York date.
+    """
+    warnings = []
+    for key, (zip_provider, kind, label) in AUXILIARY_ZIPS.items():
+        provider = str(config.get(key, ""))
+        folder = data / "equity" / "usa" / kind
+        if not provider.endswith(zip_provider):
+            warnings.append(
+                f"{key} is {provider or 'unset'}: LEAN reads only the loose {label} CSVs in {folder}, so tickers "
+                f"without one get no renames, splits or delistings, and positions held at the broker may attach to "
+                f"another security. Set \"{key}\": \"{zip_provider}\" in the workspace's lean.json.")
+            continue
+        newest = newest_zip_date(folder, kind)
+        # LEAN searches from yesterday back ZIP_LOOKBACK_DAYS days
+        if newest is None or (today - newest).days > ZIP_LOOKBACK_DAYS + 1:
+            found = f"the newest is {kind}_{newest:%Y%m%d}.zip" if newest else "there are none"
+            raise LauncherError(
+                f"LEAN's {zip_provider} needs a {kind}_YYYYMMDD.zip from the last {ZIP_LOOKBACK_DAYS} days in {folder}, "
+                f"and {found}: download the US Equity Security Master (lean data download)")
+        age = (today - newest).days
+        log(f"{label}: {kind}_{newest:%Y%m%d}.zip ({age} days old)")
+        if age > ZIP_STALE_DAYS:
+            warnings.append(
+                f"The {label} are {age} days old ({kind}_{newest:%Y%m%d}.zip): LEAN knows no rename, split or "
+                f"delisting since. Refresh them (US Equity Security Master); LEAN reloads them every day while running.")
+    return warnings
+
+
+def new_york_today() -> date:
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.now(ZoneInfo("America/New_York")).date()
+    except Exception:  # no tz database: UTC is at most a day off
+        return datetime.now(timezone.utc).date()
 
 
 RESULTS_VAR = "${results}"  # docker_command's results for run.sh: the per-run folder results_setup sets
@@ -724,7 +803,11 @@ def main(argv: list[str]) -> int:
     location = f"/Algorithm/{algorithm_file}"
     config = build_config(template, feed, feed_values, algorithm_name=algorithm_name, language=args.language,
                           algorithm_location=location, environment=args.environment,
-                          api_url=args.tradezero_api_url, extra=parse_extra(args.set))
+                          api_url=args.tradezero_api_url, extra=parse_extra(args.set),
+                          workspace_settings=workspace.settings if workspace else None)
+    if workspace:
+        for warning in check_auxiliary_data(config, workspace.data, new_york_today()):
+            log(f"WARNING: {warning}")
 
     out = args.out.resolve()
     (out / "results").mkdir(parents=True, exist_ok=True)  # run.sh adds one folder per start under it
