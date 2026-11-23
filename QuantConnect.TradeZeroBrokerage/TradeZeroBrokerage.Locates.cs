@@ -41,7 +41,7 @@ namespace QuantConnect.Brokerages.TradeZero
 
         internal string TickerOf(Symbol symbol) => _symbolMapper.GetBrokerageSymbol(symbol);
 
-        internal Symbol LeanSymbolOf(string ticker) => _symbolMapper.GetLeanSymbol(ticker);
+        internal Symbol LeanSymbolOf(string ticker) => ResolveLeanSymbol(ticker);
 
         internal bool? EasyToBorrow(string ticker) => ResolveEasyToBorrow(ticker);
 

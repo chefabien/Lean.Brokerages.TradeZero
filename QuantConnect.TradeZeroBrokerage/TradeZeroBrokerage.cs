@@ -319,7 +319,7 @@ namespace QuantConnect.Brokerages.TradeZero
                 var row = FindPnlRow(position, pnl);
                 holdings.Add(new Holding
                 {
-                    Symbol = _symbolMapper.GetLeanSymbol(position.Symbol),
+                    Symbol = ResolveLeanSymbol(position.Symbol),
                     Quantity = quantity,
                     AveragePrice = position.PriceAvg,
                     MarketPrice = price,
@@ -520,14 +520,19 @@ namespace QuantConnect.Brokerages.TradeZero
         }
 
         /// <summary>
-        /// Warns when TradeZero's positions differ from Lean's holdings twice in a row, for symbols
+        /// Warns when TradeZero's positions differ from Lean's holdings twice in a row, for tickers
         /// without working orders (fills in flight would make them differ briefly)
         /// </summary>
+        /// <remarks>
+        /// Compared by current ticker, Lean's side from Lean's own symbols: a symbol rebuilt from TradeZero's
+        /// ticker is the algorithm's only with the right map file (<see cref="ResolveLeanSymbol"/>), and a renamed
+        /// security would otherwise look flat in Lean.
+        /// </remarks>
         private void ReconcilePositions()
         {
             var positions = _client.GetPositions(_accountId)
                 .Where(p => p.SignedShares != 0)
-                .GroupBy(p => p.Symbol)
+                .GroupBy(p => p.Symbol.Trim().ToUpperInvariant())
                 .ToDictionary(g => g.Key, g => g.Sum(p => p.SignedShares));
 
             HashSet<string> busy;
@@ -536,10 +541,12 @@ namespace QuantConnect.Brokerages.TradeZero
                 busy = _ordersByLeanId.Values.Where(t => !t.Done).Select(t => t.Ticker).ToHashSet();
             }
 
+            // null outside an algorithm (tests): Lean's holdings are then read one symbol at a time
+            var leanByTicker = LeanHoldingsByTicker();
             var tickers = positions.Keys.ToHashSet();
-            foreach (var security in SecuritiesWithHoldings())
+            if (leanByTicker != null)
             {
-                tickers.Add(security);
+                tickers.UnionWith(leanByTicker.Keys);
             }
             foreach (var ticker in tickers)
             {
@@ -549,7 +556,9 @@ namespace QuantConnect.Brokerages.TradeZero
                     continue;
                 }
                 positions.TryGetValue(ticker, out var broker);
-                var lean = _securityProvider.GetHoldingsQuantity(_symbolMapper.GetLeanSymbol(ticker));
+                var lean = leanByTicker != null
+                    ? leanByTicker.GetValueOrDefault(ticker)
+                    : _securityProvider.GetHoldingsQuantity(ResolveLeanSymbol(ticker));
                 if (broker == lean)
                 {
                     _positionMismatches.Remove(ticker);
@@ -559,24 +568,12 @@ namespace QuantConnect.Brokerages.TradeZero
                 _positionMismatches[ticker] = count;
                 if (count == 2)
                 {
-                    var message = $"Position mismatch on {ticker}: TradeZero {broker}, Lean {lean}.";
-                    _apiLogger.LogEvent("lean", "position mismatch", new { ticker, broker, lean });
+                    var leanId = ResolveLeanSymbol(ticker).ID.ToString();
+                    var message = $"Position mismatch on {ticker}: TradeZero {broker}, Lean {lean} (Lean security {leanId}).";
+                    _apiLogger.LogEvent("lean", "position mismatch", new { ticker, broker, lean, leanId });
                     OnMessage(new BrokerageMessageEvent(BrokerageMessageType.Warning, "PositionMismatch", message));
                 }
             }
-        }
-
-        private IEnumerable<string> SecuritiesWithHoldings()
-        {
-            // the security provider has no enumeration; Lean's portfolio does
-            if (_securityProvider is SecurityPortfolioManager portfolio)
-            {
-                return portfolio.Values
-                    .Where(h => h.Invested && h.Symbol.SecurityType == SecurityType.Equity)
-                    .Select(h => h.Symbol.Value)
-                    .ToList();
-            }
-            return Enumerable.Empty<string>();
         }
 
         #endregion

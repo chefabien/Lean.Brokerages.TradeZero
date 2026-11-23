@@ -92,7 +92,7 @@ namespace QuantConnect.Brokerages.TradeZero
                 {
                     continue;
                 }
-                var order = TradeZeroOrderMapper.ToLeanOrder(row, _symbolMapper.GetLeanSymbol(row.Symbol));
+                var order = TradeZeroOrderMapper.ToLeanOrder(row, ResolveLeanSymbol(row.Symbol));
                 if (order == null)
                 {
                     OnMessage(new BrokerageMessageEvent(BrokerageMessageType.Warning, "UnsupportedOrder",
