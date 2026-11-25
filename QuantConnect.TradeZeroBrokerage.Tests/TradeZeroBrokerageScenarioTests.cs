@@ -27,11 +27,12 @@ using QuantConnect.Orders;
 namespace QuantConnect.Brokerages.TradeZero.Tests
 {
     /// <summary>
-    /// Brokerage behaviour against tz-mock scenarios (see tz-mock/README.md). Each test uses its own mock session.
+    /// Tests the connector (<see cref="TradeZeroBrokerage"/>), with tz-mock standing in for TradeZero (see tz-mock/README.md).
+    /// The mock's own behaviour is tested by tz-mock/tests (pytest). Each test uses its own mock session.
     /// The mock clock starts on 2026-01-05 09:31 ET; AAPL trades around 250 that morning.
     /// </summary>
     [TestFixture, Category("TzMock"), NonParallelizable]
-    public class TradeZeroBrokerageMockTests
+    public class TradeZeroBrokerageScenarioTests
     {
         private static readonly Symbol Aapl = TradeZeroHarness.Equity("AAPL");
         private static DateTime Now => DateTime.UtcNow;

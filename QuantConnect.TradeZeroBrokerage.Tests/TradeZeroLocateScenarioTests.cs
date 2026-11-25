@@ -25,10 +25,11 @@ namespace QuantConnect.Brokerages.TradeZero.Tests
 {
     /// <summary>
     /// Hard-to-borrow shorts with locates, and the <see cref="TradeZeroLocates"/> API, against tz-mock's short_htb scenario:
-    /// HTBX locates at $0.03, NOLOC no supply, SUBP under $0.50, REGSHO PreBorrow $0.03 / SingleUse $0.01 (see tz-mock/README.md)
+    /// HTBX locates at $0.03, NOLOC no supply, SUBP under $0.50, REGSHO PreBorrow $0.03 / SingleUse $0.01 (see tz-mock/README.md).
+    /// Tests the connector; the mock's own locate behaviour is tested by tz-mock/tests (pytest).
     /// </summary>
     [TestFixture, Category("TzMock"), NonParallelizable]
-    public class TradeZeroLocateMockTests
+    public class TradeZeroLocateScenarioTests
     {
         private static readonly Symbol Htbx = TradeZeroHarness.Equity("HTBX");
         private static readonly Symbol Regsho = TradeZeroHarness.Equity("REGSHO");
