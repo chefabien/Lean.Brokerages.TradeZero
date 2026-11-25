@@ -70,11 +70,13 @@ namespace QuantConnect.Brokerages.TradeZero.Api
         public const string DoneForDay = "DoneForDay";
 
         /// <summary>
-        /// True if the status is final: the order will never change again
+        /// True if the status is final: the order will never change again.
+        /// <see cref="DoneForDay"/> is not final: TradeZero parks a working order at the end of the session and
+        /// brings it back as New at the next one (paper, a GTC_Plus limit: DoneForDay after 20:00 ET, New at 04:00 ET).
         /// </summary>
         public static bool IsTerminal(string status)
         {
-            return status == Filled || status == Canceled || status == Rejected || status == Expired || status == DoneForDay;
+            return status == Filled || status == Canceled || status == Rejected || status == Expired;
         }
     }
 

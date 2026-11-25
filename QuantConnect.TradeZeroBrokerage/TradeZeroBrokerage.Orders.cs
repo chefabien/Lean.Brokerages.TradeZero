@@ -536,7 +536,7 @@ namespace QuantConnect.Brokerages.TradeZero
                     break;
 
                 default:
-                    // Canceled, Expired, DoneForDay
+                    // Canceled, Expired (DoneForDay is not final: the order is parked until the next session)
                     if (!leg.CancelForReplace && !tracked.Done)
                     {
                         tracked.Done = true;
@@ -667,11 +667,15 @@ namespace QuantConnect.Brokerages.TradeZero
             }
         }
 
+        /// <summary>
+        /// Whether an order may change soon. An order TradeZero parked until the next session (DoneForDay) doesn't
+        /// count, so polling slows down overnight; it speeds up again once the order is back.
+        /// </summary>
         private bool HasWorkingOrders()
         {
             lock (_orderLock)
             {
-                return _ordersByLeanId.Values.Any(t => !t.Done);
+                return _ordersByLeanId.Values.Any(t => !t.Done && t.Current?.Status != TzOrderStatus.DoneForDay);
             }
         }
 

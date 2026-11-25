@@ -5,7 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 
-WORKING = {"PendingNew", "New", "PartiallyFilled", "PendingCancel", "Accepted"}
+# DoneForDay: a GTC order parked between sessions; it comes back as New (see docs/api-notes.md)
+WORKING = {"PendingNew", "New", "PartiallyFilled", "PendingCancel", "Accepted", "DoneForDay"}
 TERMINAL = {"Filled", "Canceled", "Rejected", "Expired"}
 
 

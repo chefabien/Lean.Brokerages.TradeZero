@@ -101,7 +101,9 @@ Rejections marked "sync" come back in the POST response. The others return `Pend
   - A Stop triggers on `high >= stop` for buys or `low <= stop` for sells, and fills at `max(stop, open)` or `min(stop, open)`.
   - A StopLimit triggers like a Stop, then behaves as a Limit.
 - [mock] Fill quantity per bar and symbol is capped at `floor(volume × scenario.participation)`. The leftover quantity gives `PartiallyFilled`.
-- [mock] At 16:00 ET, working `Day` orders become `Expired`. This is unverified; it could be `DoneForDay`.
+- [paper] A working `GTC_Plus` limit becomes `DoneForDay` after the 20:00 ET session end (seen at 20:42 ET). It keeps its `leavesQuantity`, stays in `GET /orders`, and is `New` again at 04:00 ET (2026-11-24/25). So `DoneForDay` is not final: the order is parked between sessions.
+- [mock] At 16:00 ET, working `Day` orders become `Expired`. A Day order's real end status is unverified (`Expired`, `Canceled` or `DoneForDay`).
+- [mock] At 16:00 ET, working orders with a persistent time in force (`GoodTillCancel`, `GTC_Plus`, `GoodTillCrossing`) become `DoneForDay`. They can't fill, stay listed, and can be canceled (what paper answers to such a cancel is unverified). On the next ET date they are `New` again, or `PartiallyFilled` if they had fills. Paper parks them from 20:00 to 04:00 ET instead.
 - [mock] On a new ET date: the start-of-day snapshots are refreshed, positions become `Overnight`, flat positions are dropped, and `GET /orders` keeps only working orders from earlier days.
 - [mock] No commissions or fees.
 

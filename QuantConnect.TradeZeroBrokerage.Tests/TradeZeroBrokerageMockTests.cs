@@ -178,6 +178,73 @@ namespace QuantConnect.Brokerages.TradeZero.Tests
             Assert.AreEqual(1, TzMock.State(h.Key)["workingOrders"]!.Count());
         }
 
+        // TradeZero parks a working GTC order between sessions (DoneForDay) and brings it back as New: Lean must
+        // keep it working. Day 1's low is 245.19, day 2's 243.06, so a buy limit at 244 fills on day 2 only.
+        private static readonly DateTime AfterDay1Close = new(2026, 1, 5, 21, 1, 0, DateTimeKind.Utc);
+        private static readonly DateTime Day2Close = new(2026, 1, 6, 21, 0, 0, DateTimeKind.Utc);
+
+        private static LimitOrder GtcBuyFillingOnDay2() =>
+            new(Aapl, 10, 244m, Now, properties: new OrderProperties { TimeInForce = TimeInForce.GoodTilCanceled });
+
+        [Test]
+        public void GtcOrderParkedOvernightIsNotCanceled()
+        {
+            using var h = new TradeZeroHarness();
+            var order = GtcBuyFillingOnDay2();
+            Assert.IsTrue(h.Place(order));
+            h.AdvanceTo(AfterDay1Close);
+            Assert.AreEqual(OrderStatus.Submitted, h.StatusOf(order));
+            Assert.AreEqual(1, TzMock.State(h.Key)["workingOrders"]!.Count(), "the mock parks the order, it doesn't end it");
+
+            h.AdvanceTo(Day2Close);
+            h.WaitForStatus(order, OrderStatus.Filled);
+            Assert.IsFalse(h.EventsFor(order).Any(e => e.Status == OrderStatus.Canceled), string.Join(" | ", h.EventsFor(order)));
+            Assert.AreEqual(10m, h.Holdings("AAPL"));
+        }
+
+        [Test]
+        public void GtcOrderParkedOvernightCanBeCanceled()
+        {
+            using var h = new TradeZeroHarness();
+            var order = GtcBuyFillingOnDay2();
+            Assert.IsTrue(h.Place(order));
+            h.AdvanceTo(AfterDay1Close);
+            Assert.AreEqual(OrderStatus.Submitted, h.StatusOf(order));
+
+            Assert.IsTrue(h.Brokerage.CancelOrder(order));
+            h.WaitForStatus(order, OrderStatus.Canceled);
+            h.AdvanceTo(Day2Close);
+            Assert.AreEqual(0m, h.Holdings("AAPL"));
+        }
+
+        [Test]
+        public void RestartWhileParkedTakesOverTheOrder()
+        {
+            string key;
+            string brokerId;
+            using (var first = new TradeZeroHarness())
+            {
+                key = first.Key;
+                var order = GtcBuyFillingOnDay2();
+                Assert.IsTrue(first.Place(order));
+                brokerId = order.BrokerId.Single();
+                first.AdvanceTo(AfterDay1Close);
+            }
+
+            // same mock session, new brokerage instance: Lean restarting overnight
+            using var second = new TradeZeroHarness(scenario: null, key: key);
+            var recovered = second.Brokerage.GetOpenOrders().Single();
+            Assert.AreEqual(brokerId, recovered.BrokerId.Single());
+            Assert.AreEqual(10m, recovered.Quantity);
+
+            second.Orders.Add(recovered);
+            // live, polling adopts the parked order within seconds of the restart, long before the next session
+            second.Brokerage.PollOnce(force: true);
+            second.AdvanceTo(Day2Close);
+            second.WaitForStatus(recovered, OrderStatus.Filled);
+            Assert.AreEqual(10m, second.Holdings("AAPL"));
+        }
+
         [Test]
         public void UpdateReplacesTheOrderAndKeepsOneLeanOrder()
         {

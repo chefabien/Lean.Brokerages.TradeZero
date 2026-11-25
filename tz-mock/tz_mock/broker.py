@@ -363,6 +363,8 @@ class Broker:
                 for o in self.orders.values():
                     if o.working and o.time_in_force not in PERSISTENT_TIF:
                         self._finish(o, "Expired")
+                    elif o.status in ("New", "PartiallyFilled"):
+                        o.status, o.last_updated = "DoneForDay", self.now  # parked until the next session
                 self._expired_on = self.session_date
             day = t.astimezone(ET).date()
             if day <= self.session_date:
@@ -378,6 +380,9 @@ class Broker:
             p.day_realized = 0.0
         self.day_realized = 0.0
         self.shares_traded = 0
+        for o in self.orders.values():
+            if o.status == "DoneForDay":
+                o.status, o.last_updated = ("PartiallyFilled" if o.executed else "New"), self.now
         self._snapshot_sod()
         self._locate_day_roll()
 

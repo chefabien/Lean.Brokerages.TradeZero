@@ -28,6 +28,20 @@ namespace QuantConnect.Brokerages.TradeZero.Tests
     {
         private static readonly Symbol Aapl = TradeZeroHarness.Equity("AAPL");
 
+        // ---------------------------------------------------------------- order statuses
+
+        [TestCase(TzOrderStatus.Filled, true)]
+        [TestCase(TzOrderStatus.Canceled, true)]
+        [TestCase(TzOrderStatus.Rejected, true)]
+        [TestCase(TzOrderStatus.Expired, true)]
+        [TestCase(TzOrderStatus.DoneForDay, false)] // parked until the next session, then New again
+        [TestCase(TzOrderStatus.New, false)]
+        [TestCase(TzOrderStatus.PartiallyFilled, false)]
+        public void TerminalStatuses(string status, bool terminal)
+        {
+            Assert.AreEqual(terminal, TzOrderStatus.IsTerminal(status));
+        }
+
         // ---------------------------------------------------------------- paper / live guard
 
         [TestCase(TradeZeroEnvironment.Paper, "Paper", true)]

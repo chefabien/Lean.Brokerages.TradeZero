@@ -74,14 +74,27 @@ def test_day_order_expires_and_day_rolls(tz):
     tz.order(symbol="AAPL", orderType="Limit", limitPrice=1, timeInForce="GoodTillCancel", clientOrderId="GTC")
     tz.advance("2026-01-05T21:30:00Z")  # after the close
     assert tz.get_order("DAY")["orderStatus"] == "Expired"
-    assert tz.get_order("GTC")["orderStatus"] == "New"
+    assert tz.get_order("GTC")["orderStatus"] == "DoneForDay"  # parked until the next session
     tz.advance("2026-01-06T14:35:00Z")  # next morning
     orders = tz.get(f"/v1/api/accounts/{tz.acc}/orders").json()["orders"]
     assert [o["clientOrderId"] for o in orders] == ["GTC"]
+    assert orders[0]["orderStatus"] == "New" and orders[0]["leavesQuantity"] == 10
     [pos] = tz.positions()
     assert pos["dayOvernight"] == "Overnight"
     acct = tz.get(f"/v1/api/account/{tz.acc}").json()
     assert acct["sodEquity"] == pytest.approx(tz.pnl()["accountValue"] - tz.pnl()["dayUnrealized"], abs=0.02)
+
+
+def test_parked_gtc_order_does_not_fill_and_can_be_canceled(tz):
+    tz.order(symbol="AAPL", orderType="Limit", limitPrice=300, timeInForce="GTC_Plus", clientOrderId="P")
+    assert tz.get_order("P")["orderStatus"] == "Filled"  # marketable: proves the price is below 300
+    tz.order(symbol="AAPL", orderType="Limit", limitPrice=1, timeInForce="GTC_Plus", clientOrderId="G")
+    tz.advance("2026-01-05T21:30:00Z")
+    assert tz.get_order("G")["orderStatus"] == "DoneForDay"
+    row = tz.delete(f"/v1/api/accounts/{tz.acc}/orders/G").json()
+    assert row["orderStatus"] == "Canceled" and row["leavesQuantity"] == 0
+    tz.advance("2026-01-06T14:35:00Z")
+    assert tz.get_order("G")["orderStatus"] == "Canceled"
 
 
 def test_ioc_cancels_remainder(tz):
