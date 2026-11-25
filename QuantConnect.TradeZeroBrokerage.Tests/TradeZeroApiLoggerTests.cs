@@ -132,6 +132,22 @@ namespace QuantConnect.Brokerages.TradeZero.Tests
         }
 
         [Test]
+        public void BareNotFoundBlamesTheKeysOnlyWithoutARecentSuccess()
+        {
+            const string hint = "invalid API keys";
+            var calls = 0;
+            // 404, then 200, then 404: the keys worked in between
+            var transport = new FakeTransport(_ => ++calls == 2 ? (HttpStatusCode.OK, "{\"positions\":[]}") : (HttpStatusCode.NotFound, "Not found\n"));
+            using var client = new TradeZeroRestClient("http://example.test", KeyId, Secret, TradeZeroApiLogger.Disabled, transport: transport);
+
+            StringAssert.Contains(hint, Assert.Throws<TradeZeroApiException>(() => client.GetPositions("TZP1")).Message);
+            Assert.IsEmpty(client.GetPositions("TZP1"));
+            var afterSuccess = Assert.Throws<TradeZeroApiException>(() => client.GetPositions("TZP1"));
+            StringAssert.Contains("HTTP 404", afterSuccess.Message);
+            StringAssert.DoesNotContain(hint, afterSuccess.Message);
+        }
+
+        [Test]
         public void RotatesLargeFiles()
         {
             using (var logger = new TradeZeroApiLogger(_path, new[] { KeyId }, maxBytes: 2_000))

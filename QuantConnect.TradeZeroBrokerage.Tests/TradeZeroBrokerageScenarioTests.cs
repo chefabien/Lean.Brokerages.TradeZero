@@ -14,6 +14,7 @@
 */
 
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -22,6 +23,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Newtonsoft.Json.Linq;
 using NUnit.Framework;
+using QuantConnect.Logging;
 using QuantConnect.Orders;
 
 namespace QuantConnect.Brokerages.TradeZero.Tests
@@ -393,6 +395,71 @@ namespace QuantConnect.Brokerages.TradeZero.Tests
             Assert.IsTrue(h.Brokerage.CancelOrder(order));
             h.WaitForStatus(order, OrderStatus.Canceled);
             StringAssert.Contains("never received", h.EventsFor(order).Last().Message);
+        }
+
+        [Test]
+        public void IsolatedPollingFailuresAreTracedAndOnlyAStreakIsAnError()
+        {
+            using var h = new TradeZeroHarness();
+            var logged = new CapturingLogHandler(Log.LogHandler);
+            var previous = Log.LogHandler;
+            Log.LogHandler = logged;
+            try
+            {
+                TzMock.AddFault(h.Key, "GET", "*/orders", 404, count: 2);
+                TzMock.AddFault(h.Key, "GET", "*/pnl", 404, count: 2);
+                h.Brokerage.PollOnce(force: true);
+                h.Brokerage.PollOnce(force: true);
+            }
+            finally
+            {
+                Log.LogHandler = previous;
+            }
+
+            var traced = logged.Traces.Where(m => m.Contains("polling failed")).ToList();
+            var errors = logged.Errors.Where(m => m.Contains("polling failed")).ToList();
+            Assert.IsTrue(traced.Any(m => m.Contains("(1 in a row)")) && traced.Any(m => m.Contains("(2 in a row)")), string.Join(" | ", traced));
+            Assert.IsTrue(errors.Any(m => m.Contains("(3 in a row)")), string.Join(" | ", errors));
+            Assert.IsFalse(errors.Any(m => m.Contains("(1 in a row)") || m.Contains("(2 in a row)")), string.Join(" | ", errors));
+            Assert.IsTrue(h.Messages.Any(m => m.Code == "PollingFailed"));
+        }
+
+        private class CapturingLogHandler : ILogHandler
+        {
+            private readonly ILogHandler _inner;
+            public ConcurrentQueue<string> Traces { get; } = new();
+            public ConcurrentQueue<string> Errors { get; } = new();
+
+            public CapturingLogHandler(ILogHandler inner)
+            {
+                _inner = inner;
+            }
+
+            public void Error(string text)
+            {
+                Errors.Enqueue(text);
+                _inner?.Error(text);
+            }
+
+            public void Debug(string text)
+            {
+                _inner?.Debug(text);
+            }
+
+            public void Trace(string text)
+            {
+                Traces.Enqueue(text);
+                _inner?.Trace(text);
+            }
+
+            public void Report(string text)
+            {
+                _inner?.Report(text);
+            }
+
+            public void Dispose()
+            {
+            }
         }
 
         [Test]

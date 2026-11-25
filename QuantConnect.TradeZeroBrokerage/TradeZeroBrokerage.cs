@@ -61,6 +61,8 @@ namespace QuantConnect.Brokerages.TradeZero
         private volatile bool _connected;
         private volatile bool _disconnectReported;
         private int _consecutivePollFailures;
+        /// <summary>Polls failing in a row before an error is logged and Lean is told of a disconnect</summary>
+        internal const int PollFailuresBeforeDisconnect = 3;
         private DateTime _nextOrdersPollUtc;
         private DateTime _nextPnlPollUtc;
         private DateTime _nextReconcileUtc;
@@ -495,8 +497,18 @@ namespace QuantConnect.Brokerages.TradeZero
             catch (Exception e)
             {
                 _consecutivePollFailures++;
-                Log.Error($"TradeZeroBrokerage: polling failed ({_consecutivePollFailures} in a row): {e.Message}");
-                if (_consecutivePollFailures >= 3 && !_disconnectReported)
+                // an isolated failure is common at busy times (paper answered bare 404s in 2-3 s for a few minutes
+                // after the 2026-11-25 open, between successful calls): only a streak is an error
+                var message = $"TradeZeroBrokerage: polling failed ({_consecutivePollFailures} in a row): {e.Message}";
+                if (_consecutivePollFailures < PollFailuresBeforeDisconnect)
+                {
+                    Log.Trace(message);
+                }
+                else
+                {
+                    Log.Error(message);
+                }
+                if (_consecutivePollFailures >= PollFailuresBeforeDisconnect && !_disconnectReported)
                 {
                     _disconnectReported = true;
                     _apiLogger.LogEvent("state", "disconnected (polling failing)", new { error = e.Message });

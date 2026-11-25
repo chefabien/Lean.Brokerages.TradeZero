@@ -101,8 +101,16 @@ namespace QuantConnect.Brokerages.TradeZero.Api
         private static readonly TimeSpan[] ThrottleBackoff = { TimeSpan.FromSeconds(1.5), TimeSpan.FromSeconds(3), TimeSpan.FromSeconds(6) };
         private static readonly TimeSpan[] TransientBackoff = { TimeSpan.FromSeconds(0.5), TimeSpan.FromSeconds(1.5) };
 
+        /// <summary>
+        /// A bare 404 is blamed on the API keys only when no request succeeded this recently: TradeZero also
+        /// answers it, slowly, when overloaded (paper, 2026-11-25 after the open, between successful calls)
+        /// </summary>
+        internal static readonly TimeSpan KeysProvenFor = TimeSpan.FromMinutes(1);
+
         private readonly HttpClient _http;
         private readonly Dictionary<string, RateGate> _gates;
+        // DateTime.UtcNow ticks of the last 2xx answer, 0 before the first
+        private long _lastSuccessTicks;
 
         /// <summary>The API host this client talks to</summary>
         public Uri BaseUrl { get; }
@@ -395,6 +403,10 @@ namespace QuantConnect.Brokerages.TradeZero.Api
                         }
                         throw new TradeZeroApiException($"{method} {path}: HTTP {(int)status}", status, body, isOutcomeUnknown: !isGet);
                     }
+                    if ((int)status >= 200 && (int)status < 300)
+                    {
+                        Interlocked.Exchange(ref _lastSuccessTicks, DateTime.UtcNow.Ticks);
+                    }
                     return (status, body);
                 }
             }
@@ -409,15 +421,22 @@ namespace QuantConnect.Brokerages.TradeZero.Api
             return e is HttpRequestException { HttpRequestError: HttpRequestError.NameResolutionError };
         }
 
-        private static void EnsureSuccess(HttpStatusCode status, string body, string what)
+        private void EnsureSuccess(HttpStatusCode status, string body, string what)
         {
             if ((int)status < 200 || (int)status >= 300)
             {
                 var hint = status == HttpStatusCode.NotFound && string.Equals(body?.Trim(), "Not found", StringComparison.Ordinal)
+                        && !SucceededWithin(KeysProvenFor)
                     ? " (TradeZero answers a bare 404 for missing/invalid API keys)"
                     : string.Empty;
                 throw new TradeZeroApiException($"{what}: HTTP {(int)status}{hint}", status, body, isOutcomeUnknown: false);
             }
+        }
+
+        private bool SucceededWithin(TimeSpan window)
+        {
+            var last = Interlocked.Read(ref _lastSuccessTicks);
+            return last != 0 && DateTime.UtcNow.Ticks - last <= window.Ticks;
         }
 
         private static T Parse<T>(string body)
