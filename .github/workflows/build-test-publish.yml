@@ -130,14 +130,11 @@ jobs:
       # ---------------------------------------------------------------- test
 
       # The mock's own tests come first: the connector tests below are only as good as the mock they run against.
-      # Same Python and dependencies as tz-mock/environment.yml (keep the two in sync).
+      # The test stage shares its layers with the image the next step serves.
       - name: "Test: tz-mock's own tests (pytest)"
         run: |
-          docker run --rm -v "$GITHUB_WORKSPACE/$REPO_DIR/tz-mock:/tz-mock" -w /tz-mock \
-            -e PYTHONDONTWRITEBYTECODE=1 python:3.14-slim sh -c '
-              pip install --no-cache-dir --root-user-action=ignore -q \
-                "fastapi>=0.115" "uvicorn>=0.30" "python-multipart>=0.0.9" "pytest>=8" "httpx2>=2.16" &&
-              python -m pytest -q -p no:cacheprovider'
+          docker build --target test -t tz-mock-test "$REPO_DIR/tz-mock"
+          docker run --rm tz-mock-test
 
       - name: "Test: start tz-mock"
         run: |

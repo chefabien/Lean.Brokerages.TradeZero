@@ -1,0 +1,4 @@
+# What the tests need on top of the server (FastAPI's TestClient uses httpx2).
+-r requirements.txt
+pytest>=8
+httpx2>=2.16

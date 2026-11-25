@@ -1,0 +1,4 @@
+# What the server needs. Used by the Dockerfile and, through requirements-test.txt, by environment.yml.
+fastapi>=0.115
+uvicorn>=0.30
+python-multipart>=0.0.9
