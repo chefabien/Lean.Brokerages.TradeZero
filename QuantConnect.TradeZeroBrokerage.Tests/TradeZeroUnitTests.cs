@@ -15,6 +15,9 @@
 
 using System;
 using System.Collections.Generic;
+using System.Net.Http;
+using System.Threading;
+using System.Threading.Tasks;
 using NUnit.Framework;
 using QuantConnect.Brokerages.TradeZero.Api;
 using QuantConnect.Orders;
@@ -230,6 +233,35 @@ namespace QuantConnect.Brokerages.TradeZero.Tests
             Assert.AreEqual(0.99m + 0.5m, fees.GetFillFee(100, isFirstFill: true).Value.Amount);
             Assert.AreEqual(0.5m, fees.GetFillFee(100, isFirstFill: false).Value.Amount);
             Assert.AreEqual(0m, new TradeZeroFeeModel().GetFillFee(100, true).Value.Amount);
+        }
+
+        // ---------------------------------------------------------------- unreachable API
+
+        [TestCase(HttpRequestError.NameResolutionError, false)] // no connection was opened: the order was not sent
+        [TestCase(HttpRequestError.ConnectionError, true)]
+        [TestCase(HttpRequestError.ResponseEnded, true)]
+        [TestCase(HttpRequestError.Unknown, true)]
+        public void FailedOrderPostIsOutcomeUnknownUnlessTheHostWasNotResolved(HttpRequestError error, bool outcomeUnknown)
+        {
+            using var client = new TradeZeroRestClient("http://example.test", "key", "secret", null,
+                transport: new FailingTransport(new HttpRequestException(error, "Resource temporarily unavailable (example.test:443)")));
+            var e = Assert.Throws<TradeZeroApiException>(() => client.PlaceOrder("TZP1", new TzOrderRequest { ClientOrderId = "LN1.1.1", Symbol = "AAPL" }));
+            Assert.AreEqual(outcomeUnknown, e.IsOutcomeUnknown);
+            Assert.IsNull(e.StatusCode);
+        }
+
+        private class FailingTransport : HttpMessageHandler
+        {
+            private readonly Exception _error;
+
+            public FailingTransport(Exception error)
+            {
+                _error = error;
+            }
+
+            protected override HttpResponseMessage Send(HttpRequestMessage request, CancellationToken cancellationToken) => throw _error;
+
+            protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) => Task.FromException<HttpResponseMessage>(_error);
         }
     }
 }

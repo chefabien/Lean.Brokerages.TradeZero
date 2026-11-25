@@ -348,7 +348,8 @@ namespace QuantConnect.Brokerages.TradeZero.Api
         /// Sends a request with rate limiting and retries:
         /// - 429 (request not processed): retried for every method, with backoff;
         /// - network errors, timeouts and 5xx: retried for GET only; other methods raise an
-        ///   exception with <see cref="TradeZeroApiException.IsOutcomeUnknown"/> set.
+        ///   exception with <see cref="TradeZeroApiException.IsOutcomeUnknown"/> set, except when the
+        ///   API host name could not be resolved: then nothing was sent.
         /// </summary>
         private (HttpStatusCode Status, string Body) Send(string gate, HttpMethod method, string path, Func<HttpContent> content = null)
         {
@@ -371,7 +372,8 @@ namespace QuantConnect.Brokerages.TradeZero.Api
                         Thread.Sleep(TransientBackoff[transient++]);
                         continue;
                     }
-                    throw new TradeZeroApiException($"{method} {path}: {e.GetType().Name}: {e.Message}", null, null, isOutcomeUnknown: !isGet, e);
+                    throw new TradeZeroApiException($"{method} {path}: {e.GetType().Name}: {e.Message}", null, null,
+                        isOutcomeUnknown: !isGet && !IsNameResolutionFailure(e), e);
                 }
 
                 using (response)
@@ -396,6 +398,15 @@ namespace QuantConnect.Brokerages.TradeZero.Api
                     return (status, body);
                 }
             }
+        }
+
+        /// <summary>
+        /// The API host name could not be resolved (DNS down or unreachable): no connection was opened, so the
+        /// request certainly did not reach TradeZero. Other connection failures stay "outcome unknown".
+        /// </summary>
+        internal static bool IsNameResolutionFailure(Exception e)
+        {
+            return e is HttpRequestException { HttpRequestError: HttpRequestError.NameResolutionError };
         }
 
         private static void EnsureSuccess(HttpStatusCode status, string body, string what)

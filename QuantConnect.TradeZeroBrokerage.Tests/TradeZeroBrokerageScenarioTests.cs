@@ -344,6 +344,57 @@ namespace QuantConnect.Brokerages.TradeZero.Tests
             StringAssert.Contains("R100", h.EventsFor(order).Last().Message);
         }
 
+        // A POST /order whose outcome is unknown is looked up 3 times; each GetOrder is tried 3 times (2 retries),
+        // so 9 failing lookups leave the order unconfirmed: the order polling has to settle it.
+        private const int FailedLookups = 9;
+
+        [Test]
+        public void OrderPlacedDespiteALostResponseAndFailingLookupsIsFollowedUntilFilled()
+        {
+            using var h = new TradeZeroHarness();
+            TzMock.AddFault(h.Key, "POST", "*/order", 502, when: "after");
+            TzMock.AddFault(h.Key, "GET", "*/order/LN*", 503, count: FailedLookups);
+            var order = new MarketOrder(Aapl, 10, Now);
+            Assert.IsTrue(h.Place(order));
+            Assert.IsTrue(h.Messages.Any(m => m.Code == "OrderUnconfirmed"));
+            Assert.AreEqual(OrderStatus.Submitted, h.EventsFor(order).First().Status);
+
+            h.WaitForStatus(order, OrderStatus.Filled);
+            Assert.AreEqual(10m, h.FilledQuantity(order));
+            Assert.AreEqual(10m, h.Holdings("AAPL"));
+            Assert.AreEqual(1, order.BrokerId.Count);
+        }
+
+        [Test]
+        public void UnconfirmedOrderTradeZeroNeverReceivedBecomesInvalid()
+        {
+            using var h = new TradeZeroHarness();
+            TzMock.AddFault(h.Key, "POST", "*/order", 502);
+            TzMock.AddFault(h.Key, "GET", "*/order/LN*", 503, count: FailedLookups);
+            var order = new MarketOrder(Aapl, 10, Now);
+            Assert.IsTrue(h.Place(order));
+
+            h.WaitForStatus(order, OrderStatus.Invalid);
+            StringAssert.Contains("never received", h.EventsFor(order).Last().Message);
+            Assert.AreEqual(0m, h.Holdings("AAPL"));
+            Assert.AreEqual(0, TzMock.State(h.Key)["terminalOrders"]!.Value<int>());
+        }
+
+        [Test]
+        public void CancelOfAnUnconfirmedOrderTradeZeroNeverReceivedSucceeds()
+        {
+            using var h = new TradeZeroHarness();
+            TzMock.AddFault(h.Key, "POST", "*/order", 502);
+            TzMock.AddFault(h.Key, "GET", "*/order/LN*", 503, count: FailedLookups);
+            var order = new LimitOrder(Aapl, 10, 200m, Now);
+            Assert.IsTrue(h.Place(order));
+            Assert.IsFalse(h.Update(order, new UpdateOrderFields { LimitPrice = 201m }), "no update before TradeZero confirms the order");
+
+            Assert.IsTrue(h.Brokerage.CancelOrder(order));
+            h.WaitForStatus(order, OrderStatus.Canceled);
+            StringAssert.Contains("never received", h.EventsFor(order).Last().Message);
+        }
+
         [Test]
         public void UnsupportedOrdersNeverReachTradeZero()
         {

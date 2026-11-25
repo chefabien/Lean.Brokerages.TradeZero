@@ -47,6 +47,11 @@ namespace QuantConnect.Brokerages.TradeZero
             public bool CancelForReplace;
             public DateTime PlacedUtc;
             public int MissingPolls;
+            /// <summary>
+            /// Why TradeZero has not confirmed the leg yet: the POST failed in a way that leaves its outcome unknown and
+            /// the order could not be looked up. Null once TradeZero reported the leg (or for a normally placed leg).
+            /// </summary>
+            public string Unconfirmed;
         }
 
         private sealed class TrackedOrder
@@ -208,7 +213,7 @@ namespace QuantConnect.Brokerages.TradeZero
                     {
                         order.BrokerId.Add(result.Leg.ClientOrderId);
                     }
-                    OnOrderEvent(new OrderEvent(order, DateTime.UtcNow, OrderFee.Zero, "TradeZero order submitted") { Status = OrderStatus.Submitted });
+                    OnOrderEvent(new OrderEvent(order, DateTime.UtcNow, OrderFee.Zero, result.Message ?? "TradeZero order submitted") { Status = OrderStatus.Submitted });
                     if (result.Row != null)
                     {
                         ApplyLegUpdate(tracked, result.Leg, result.Row);
@@ -259,6 +264,10 @@ namespace QuantConnect.Brokerages.TradeZero
                     else if (tracked.Current.Terminal)
                     {
                         refusal = "the TradeZero order is already final (a zero-crossing order between its two parts)";
+                    }
+                    else if (tracked.Current.Unconfirmed != null)
+                    {
+                        refusal = $"TradeZero has not confirmed {tracked.Current.ClientOrderId} yet";
                     }
                     else
                     {
@@ -326,7 +335,7 @@ namespace QuantConnect.Brokerages.TradeZero
                     }
 
                     NotifyBrokerIds(tracked, order);
-                    EmitEvent(tracked, OrderStatus.UpdateSubmitted, null, $"TradeZero order replaced by {result.Leg.ClientOrderId}");
+                    EmitEvent(tracked, OrderStatus.UpdateSubmitted, null, result.Message ?? $"TradeZero order replaced by {result.Leg.ClientOrderId}");
                     if (result.Row != null)
                     {
                         ApplyLegUpdate(tracked, result.Leg, result.Row);
@@ -377,6 +386,12 @@ namespace QuantConnect.Brokerages.TradeZero
                     var row = _client.CancelOrder(_accountId, leg.ClientOrderId);
                     if (row == null)
                     {
+                        if (leg.Unconfirmed != null)
+                        {
+                            // the submit whose outcome was unknown never reached TradeZero: nothing is working
+                            ResolveNeverReceived(tracked, leg, OrderStatus.Canceled);
+                            return true;
+                        }
                         Warn("CancelRejected", $"Order {order.Id} not canceled: TradeZero does not know {leg.ClientOrderId}.");
                         return false;
                     }
@@ -414,6 +429,7 @@ namespace QuantConnect.Brokerages.TradeZero
             _apiLogger.LogEvent("lean", "submit leg", new { leanOrderId = tracked.LeanOrderId, request });
 
             TzOrder row;
+            string unconfirmed = null;
             try
             {
                 row = _client.PlaceOrder(_accountId, request);
@@ -425,17 +441,32 @@ namespace QuantConnect.Brokerages.TradeZero
                 row = LookUpAfterUncertainSubmit(clientOrderId);
                 if (row == null)
                 {
-                    return new SubmitResult(false, null, null, $"TradeZero did not confirm the order ({e.Message}) and does not know {clientOrderId}.");
+                    // TradeZero may have the order even though it could not be found yet (lookups failing, or the
+                    // request still being processed behind a 5xx): keep following it, the order polling settles it
+                    unconfirmed = e.Message;
                 }
+            }
+            catch (TradeZeroApiException e) when (e.StatusCode == null)
+            {
+                return new SubmitResult(false, null, null, $"The order was not sent: TradeZero is unreachable ({e.Message}).");
             }
             catch (TradeZeroApiException e)
             {
                 return new SubmitResult(false, null, null, $"TradeZero rejected the order: {e.ServerMessage}");
             }
 
-            var leg = new Leg { ClientOrderId = clientOrderId, Plan = plan, PlacedUtc = DateTime.UtcNow };
+            var leg = new Leg { ClientOrderId = clientOrderId, Plan = plan, PlacedUtc = DateTime.UtcNow, Unconfirmed = unconfirmed };
             tracked.Legs.Add(leg);
             _legsByClientOrderId[clientOrderId] = (tracked, leg);
+
+            if (unconfirmed != null)
+            {
+                var message = $"TradeZero has not confirmed order {clientOrderId} ({unconfirmed}): following it until TradeZero reports it, " +
+                    "or reports it never received it.";
+                _apiLogger.LogEvent("lean", "submit unconfirmed", new { leanOrderId = tracked.LeanOrderId, clientOrderId, error = unconfirmed });
+                Warn("OrderUnconfirmed", $"Order {tracked.LeanOrderId}: {message}");
+                return new SubmitResult(true, leg, null, message);
+            }
 
             if (row.OrderStatus == TzOrderStatus.Rejected)
             {
@@ -495,6 +526,11 @@ namespace QuantConnect.Brokerages.TradeZero
                 return;
             }
             leg.MissingPolls = 0;
+            if (leg.Unconfirmed != null)
+            {
+                leg.Unconfirmed = null;
+                _apiLogger.LogEvent("lean", "submit confirmed", new { leanOrderId = tracked.LeanOrderId, clientOrderId = leg.ClientOrderId, status = row.OrderStatus });
+            }
 
             if (row.Executed > leg.Executed && !tracked.Done)
             {
@@ -546,6 +582,27 @@ namespace QuantConnect.Brokerages.TradeZero
                     }
                     break;
             }
+        }
+
+        /// <summary>
+        /// An unconfirmed leg TradeZero says it doesn't know: the submit never reached it, so the Lean order ends
+        /// (Invalid when nothing was filled, otherwise Canceled for the rest; or the given status)
+        /// </summary>
+        private void ResolveNeverReceived(TrackedOrder tracked, Leg leg, OrderStatus? status = null)
+        {
+            var reason = leg.Unconfirmed;
+            leg.Unconfirmed = null;
+            leg.Terminal = true;
+            leg.Status = TzOrderStatus.Rejected;
+            _apiLogger.LogEvent("lean", "submit never received", new { leanOrderId = tracked.LeanOrderId, clientOrderId = leg.ClientOrderId, error = reason });
+            if (tracked.Done)
+            {
+                return;
+            }
+            tracked.Done = true;
+            tracked.PendingLeg = null;
+            var final = status ?? (tracked.FilledQuantity == 0 ? OrderStatus.Invalid : OrderStatus.Canceled);
+            EmitEvent(tracked, final, null, $"TradeZero never received order {leg.ClientOrderId} ({reason}).");
         }
 
         /// <summary>
@@ -719,15 +776,20 @@ namespace QuantConnect.Brokerages.TradeZero
             foreach (var leg in missing)
             {
                 var row = _client.GetOrder(_accountId, leg.ClientOrderId);
-                if (row == null)
-                {
-                    continue;
-                }
                 lock (_orderLock)
                 {
-                    if (_legsByClientOrderId.TryGetValue(leg.ClientOrderId, out var entry))
+                    if (!_legsByClientOrderId.TryGetValue(leg.ClientOrderId, out var entry))
+                    {
+                        continue;
+                    }
+                    if (row != null)
                     {
                         ApplyLegUpdate(entry.Order, entry.Leg, row);
+                    }
+                    else if (entry.Leg.Unconfirmed != null && !entry.Leg.Terminal)
+                    {
+                        // absent from two order lists and unknown to a direct lookup: never received
+                        ResolveNeverReceived(entry.Order, entry.Leg);
                     }
                 }
             }
